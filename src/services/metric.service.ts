@@ -470,6 +470,23 @@ export const metricService = {
   /**
    * Helper: Kiểm tra xem chỉ số đã có dữ liệu nhập liệu (metric_entries) hay chưa
    */
+  
+  /**
+   * Helper: Kiểm tra metric đã có dữ liệu nhập chưa
+   */
+  async metricHasEntries(metricId: string): Promise<boolean> {
+    const count = await this.getMetricEntriesCount(metricId);
+    return count > 0;
+  },
+
+  /**
+   * Helper: Lấy danh sách organizations (nếu cần filter)
+   * Ở đây có thể tái sử dụng organizationService
+   */
+  async getMetricOrganizations(): Promise<OrganizationUnit[]> {
+    return organizationService.getUnits();
+  },
+
   async getMetricEntriesCount(metricDefinitionId: string): Promise<number> {
     const supabase = getSupabaseClient();
     if (!supabase) {
@@ -594,6 +611,8 @@ export const createMetricDefinition = (payload: CreateMetricDefinitionPayload, u
 export const updateMetricDefinition = (id: string, updates: UpdateMetricDefinitionPayload) =>
   metricService.updateMetricDefinition(id, updates);
 
+export const metricHasEntries = (id: string) => metricService.metricHasEntries(id);
+export const getMetricOrganizations = () => metricService.getMetricOrganizations();
 export const toggleMetricDefinition = (id: string, is_active?: boolean) =>
   metricService.toggleMetricDefinition(id, is_active);
 

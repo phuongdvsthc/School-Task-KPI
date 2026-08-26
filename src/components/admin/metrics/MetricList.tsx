@@ -1,11 +1,6 @@
 /**
  * MetricList Component (/admin/metrics)
  * Quản trị Danh mục Chỉ số Đo lường (Metric Definitions)
- * Yêu cầu:
- * 1. Hiển thị danh sách metric_definitions với các cột: Tên chỉ số, Mã, Đơn vị, Nhóm, Loại dữ liệu, Tần suất, Trạng thái.
- * 2. Bộ lọc: Organization Unit, Category, Active / Inactive.
- * 3. Thao tác: Tạo mới, Sửa, Bật/tắt chỉ số (is_active).
- * 4. Không xóa vật lý.
  */
 import React, { useState, useEffect } from 'react';
 import { 
@@ -13,7 +8,8 @@ import {
   MetricFilterOptions,
   METRIC_CATEGORY_LABELS,
   METRIC_DATA_TYPE_LABELS,
-  METRIC_FREQUENCY_LABELS
+  METRIC_FREQUENCY_LABELS,
+  MeasurementScope
 } from '../../../types/metric';
 import { OrganizationUnit } from '../../../types/database';
 import { metricService } from '../../../services/metricService';
@@ -50,6 +46,12 @@ interface MetricListProps {
   onNavigateEdit: (id: string) => void;
 }
 
+const MEASUREMENT_SCOPE_LABELS: Record<string, string> = {
+  individual: 'Cá nhân',
+  unit: 'Đơn vị',
+  organization: 'Toàn trường'
+};
+
 export const MetricList: React.FC<MetricListProps> = ({
   onNavigateNew,
   onNavigateEdit,
@@ -64,6 +66,7 @@ export const MetricList: React.FC<MetricListProps> = ({
   const [selectedUnit, setSelectedUnit] = useState<string>('all');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [selectedStatus, setSelectedStatus] = useState<'all' | 'active' | 'inactive'>('all');
+  const [selectedScope, setSelectedScope] = useState<string>('all');
 
   // Preview Modal
   const [previewMetric, setPreviewMetric] = useState<MetricDefinition | null>(null);
@@ -80,7 +83,7 @@ export const MetricList: React.FC<MetricListProps> = ({
     setIsLoading(true);
     try {
       const filterParams: MetricFilterOptions = {};
-
+      
       if (selectedUnit !== 'all') {
         filterParams.organization_unit_id = selectedUnit;
       }
@@ -92,603 +95,396 @@ export const MetricList: React.FC<MetricListProps> = ({
       } else if (selectedStatus === 'inactive') {
         filterParams.is_active = false;
       }
+      if (selectedScope !== 'all') {
+        filterParams.measurement_scope = selectedScope;
+      }
       if (searchQuery.trim()) {
         filterParams.search_query = searchQuery.trim();
       }
 
       const [metricsData, unitsData] = await Promise.all([
         metricService.getMetricDefinitions(filterParams),
-        organizationService.getUnits().catch(() => []),
+        organizationService.getUnits()
       ]);
 
-      setMetrics(metricsData);
+      // Yêu cầu: Sort (org -> sort_order -> name)
+      const sortedMetrics = [...metricsData].sort((a, b) => {
+        // Sort by org unit ID string comparison (simplistic grouping by org)
+        const orgA = a.organization_unit_id || '';
+        const orgB = b.organization_unit_id || '';
+        if (orgA !== orgB) return orgA.localeCompare(orgB);
+        
+        // Sort by sort_order
+        const sortA = a.sort_order || 0;
+        const sortB = b.sort_order || 0;
+        if (sortA !== sortB) return sortA - sortB;
+        
+        // Sort by name
+        return a.name.localeCompare(b.name);
+      });
+
+      setMetrics(sortedMetrics);
       setUnits(unitsData);
-    } catch (err: any) {
-      console.error('Lỗi khi tải danh sách chỉ số:', err);
-      showToast(err.message || 'Không thể tải danh sách chỉ số', 'error');
+    } catch (error: any) {
+      console.error('Failed to load metrics:', error);
+      showToast('Không thể tải danh sách chỉ số: ' + error.message, 'error');
     } finally {
       setIsLoading(false);
     }
   };
 
+  // Init load & effect hooks for filters
   useEffect(() => {
     loadData();
-  }, [selectedUnit, selectedCategory, selectedStatus]);
+  }, [selectedUnit, selectedCategory, selectedStatus, selectedScope]);
 
-  // Debounced search on enter or click
-  const handleSearchSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    loadData();
-  };
+  // Debounced search
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      loadData();
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
 
-  const handleResetFilters = () => {
-    setSearchQuery('');
-    setSelectedUnit('all');
-    setSelectedCategory('all');
-    setSelectedStatus('all');
-  };
-
-  // Toggle is_active handler
-  const handleToggleStatus = async (metric: MetricDefinition) => {
-    const nextStatus = !metric.is_active;
-    const actionName = nextStatus ? 'kích hoạt lại' : 'tạm dừng';
-
-    setActionLoadingId(metric.id);
+  const handleToggleActive = async (id: string, currentStatus: boolean) => {
+    setActionLoadingId(id);
     try {
-      const updated = await metricService.toggleMetricDefinition(metric.id, nextStatus);
+      await metricService.toggleMetricDefinition(id, !currentStatus);
+      showToast(`Đã ${!currentStatus ? 'kích hoạt' : 'tạm ngưng'} chỉ số thành công`);
+      // Update local state to avoid full reload
+      setMetrics(metrics.map(m => m.id === id ? { ...m, is_active: !currentStatus } : m));
       
-      // Update locally
-      setMetrics((prev) =>
-        prev.map((m) => (m.id === metric.id ? { ...m, is_active: updated.is_active } : m))
-      );
-
-      showToast(
-        `Đã ${actionName} chỉ số "${metric.name}" (${updated.code}). Dữ liệu lịch sử vẫn được bảo toàn.`,
-        'success'
-      );
+      // Close preview if it's the current metric
+      if (previewMetric && previewMetric.id === id) {
+        setPreviewMetric({ ...previewMetric, is_active: !currentStatus });
+      }
     } catch (err: any) {
-      console.error('Lỗi khi thay đổi trạng thái chỉ số:', err);
-      showToast(err.message || 'Lỗi khi cập nhật trạng thái chỉ số', 'error');
+      showToast('Lỗi khi thay đổi trạng thái: ' + err.message, 'error');
     } finally {
       setActionLoadingId(null);
     }
   };
 
-  // Stats calculation
-  const totalCount = metrics.length;
-  const activeCount = metrics.filter((m) => m.is_active).length;
-  const inactiveCount = metrics.filter((m) => !m.is_active).length;
+  const getUnitName = (id: string | null) => {
+    if (!id) return 'Toàn trường';
+    const unit = units.find(u => u.id === id);
+    return unit ? unit.name : 'Unknown Unit';
+  };
+
+  const clearFilters = () => {
+    setSearchQuery('');
+    setSelectedUnit('all');
+    setSelectedCategory('all');
+    setSelectedStatus('all');
+    setSelectedScope('all');
+  };
+
+  const activeFiltersCount = [
+    selectedUnit !== 'all',
+    selectedCategory !== 'all',
+    selectedStatus !== 'all',
+    selectedScope !== 'all'
+  ].filter(Boolean).length;
 
   return (
-    <div id="metric-admin-view" className="space-y-6">
+    <div className="space-y-6">
       {/* Toast Notification */}
       {toastMessage && (
-        <div
-          id="metric-toast-alert"
-          className={`flex items-center justify-between rounded-lg p-4 shadow-md transition-all ${
-            toastMessage.type === 'success'
-              ? 'bg-emerald-50 border border-emerald-200 text-emerald-900'
-              : 'bg-red-50 border border-red-200 text-red-900'
-          }`}
-        >
-          <div className="flex items-center gap-3">
-            {toastMessage.type === 'success' ? (
-              <CheckCircle2 className="h-5 w-5 text-emerald-600 shrink-0" />
-            ) : (
-              <AlertCircle className="h-5 w-5 text-red-600 shrink-0" />
-            )}
-            <span className="text-sm font-medium">{toastMessage.text}</span>
-          </div>
-          <button
-            onClick={() => setToastMessage(null)}
-            className="text-xs font-semibold hover:underline"
-          >
-            Đóng
-          </button>
+        <div className={`fixed top-4 right-4 z-50 flex items-center gap-3 px-4 py-3 rounded-xl shadow-lg border ${
+          toastMessage.type === 'success' 
+            ? 'bg-emerald-50 border-emerald-200 text-emerald-800' 
+            : 'bg-red-50 border-red-200 text-red-800'
+        } animate-in slide-in-from-top-2`}>
+          {toastMessage.type === 'success' ? (
+            <CheckCircle2 className="h-5 w-5 text-emerald-600" />
+          ) : (
+            <AlertCircle className="h-5 w-5 text-red-600" />
+          )}
+          <span className="text-sm font-medium">{toastMessage.text}</span>
         </div>
       )}
 
-      {/* Header & Quick Action */}
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+      {/* Header Actions */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-indigo-700">
-            <span>Quản Trị Hệ Thống</span>
-            <span>•</span>
-            <span className="font-mono text-slate-500">/admin/metrics</span>
-          </div>
-          <h1 className="mt-1 text-2xl font-bold text-slate-900 tracking-tight">
-            Quản Trị Danh Mục Chỉ Số Đo Lường (Metric Definitions)
-          </h1>
-          <p className="mt-1 text-sm text-slate-600">
-            Khung định nghĩa các chỉ số định lượng, định tính áp dụng cho toàn trường và các đơn vị phòng ban, khoa đào tạo.
-          </p>
+          <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Cấu hình Chỉ số (Metrics)</h1>
+          <p className="mt-1 text-sm text-slate-500">Quản lý danh mục và tham số đo lường hiệu suất (KPIs)</p>
         </div>
-
         <button
-          id="btn-create-metric"
           onClick={onNavigateNew}
-          className="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-900 px-4 py-2.5 text-sm font-semibold text-white shadow-xs hover:bg-indigo-800 transition-colors focus:ring-2 focus:ring-indigo-600 focus:outline-hidden shrink-0"
+          className="inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 transition-all"
         >
           <Plus className="h-4 w-4" />
-          <span>Thêm Chỉ Số Mới</span>
+          Tạo Chỉ số mới
         </button>
       </div>
 
-      {/* Stats Summary Bar */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-        <div className="flex items-center justify-between rounded-xl border border-slate-200 bg-white p-4 shadow-xs">
-          <div>
-            <p className="text-xs font-medium text-slate-500">Tổng Số Chỉ Số</p>
-            <p className="mt-1 text-2xl font-bold text-slate-900">{totalCount}</p>
-          </div>
-          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-indigo-50 text-indigo-800">
-            <BarChart3 className="h-5 w-5" />
-          </div>
+      {/* Filters Toolbar */}
+      <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-xs space-y-4">
+        <div className="flex items-center gap-2 pb-2 border-b border-slate-100">
+          <SlidersHorizontal className="h-4 w-4 text-slate-400" />
+          <h2 className="text-sm font-semibold text-slate-700">Bộ lọc & Tìm kiếm</h2>
+          {activeFiltersCount > 0 && (
+            <span className="ml-2 inline-flex items-center justify-center rounded-full bg-indigo-100 px-2.5 py-0.5 text-xs font-semibold text-indigo-700">
+              {activeFiltersCount} đang bật
+            </span>
+          )}
         </div>
 
-        <div className="flex items-center justify-between rounded-xl border border-slate-200 bg-white p-4 shadow-xs">
-          <div>
-            <p className="text-xs font-medium text-slate-500">Đang Áp Dụng (Active)</p>
-            <p className="mt-1 text-2xl font-bold text-emerald-700">{activeCount}</p>
-          </div>
-          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700">
-            <CheckCircle2 className="h-5 w-5" />
-          </div>
-        </div>
-
-        <div className="flex items-center justify-between rounded-xl border border-slate-200 bg-white p-4 shadow-xs">
-          <div>
-            <p className="text-xs font-medium text-slate-500">Đã Tạm Dừng (Inactive)</p>
-            <p className="mt-1 text-2xl font-bold text-slate-600">{inactiveCount}</p>
-          </div>
-          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-slate-100 text-slate-600">
-            <Power className="h-5 w-5" />
-          </div>
-        </div>
-      </div>
-
-      {/* Filter Toolbar */}
-      <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-xs space-y-4">
-        <form onSubmit={handleSearchSubmit} className="flex flex-col gap-3 lg:flex-row lg:items-center">
-          {/* Keyword Search */}
-          <div className="relative flex-1">
-            <Search className="absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+          <div className="relative">
+            <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3">
+              <Search className="h-4 w-4 text-slate-400" />
+            </div>
             <input
-              id="filter-metric-search"
               type="text"
-              placeholder="Tìm theo tên chỉ số, mã (METRIC_...), hoặc mô tả..."
+              placeholder="Tên, mã chỉ số..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full rounded-lg border border-slate-300 bg-white py-2 pl-10 pr-4 text-sm text-slate-900 placeholder:text-slate-400 focus:border-indigo-600 focus:outline-hidden focus:ring-1 focus:ring-indigo-600"
+              className="block w-full rounded-xl border border-slate-300 py-2 pl-9 pr-3 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
             />
           </div>
 
-          <button
-            type="submit"
-            className="inline-flex items-center justify-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 transition-colors"
+          <select
+            value={selectedUnit}
+            onChange={(e) => setSelectedUnit(e.target.value)}
+            className="block w-full rounded-xl border border-slate-300 py-2 pl-3 pr-10 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 appearance-none bg-white"
           >
-            <Search className="h-4 w-4" />
-            <span>Tìm kiếm</span>
-          </button>
-        </form>
+            <option value="all">Tất cả Đơn vị</option>
+            {units.map((u) => (
+              <option key={u.id} value={u.id}>{u.name}</option>
+            ))}
+          </select>
 
-        {/* Dropdown Filters */}
-        <div className="grid grid-cols-1 gap-3 border-t border-slate-100 pt-3 sm:grid-cols-2 lg:grid-cols-4">
-          {/* Filter 1: Organization Unit */}
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1 flex items-center gap-1.5">
-              <Building2 className="h-3.5 w-3.5 text-slate-500" />
-              Đơn vị áp dụng
-            </label>
-            <select
-              id="filter-metric-unit"
-              value={selectedUnit}
-              onChange={(e) => setSelectedUnit(e.target.value)}
-              className="w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-900 focus:border-indigo-600 focus:outline-hidden focus:ring-1 focus:ring-indigo-600"
-            >
-              <option value="all">Tất cả đơn vị</option>
-              <option value="general">Toàn trường (Chung)</option>
-              {units.map((u) => (
-                <option key={u.id} value={u.id}>
-                  {u.name} ({u.code})
-                </option>
-              ))}
-            </select>
-          </div>
+          <select
+            value={selectedCategory}
+            onChange={(e) => setSelectedCategory(e.target.value)}
+            className="block w-full rounded-xl border border-slate-300 py-2 pl-3 pr-10 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 appearance-none bg-white"
+          >
+            <option value="all">Tất cả Nhóm</option>
+            {Object.entries(METRIC_CATEGORY_LABELS).map(([k, v]) => (
+              <option key={k} value={k}>{v.label}</option>
+            ))}
+          </select>
 
-          {/* Filter 2: Category */}
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1 flex items-center gap-1.5">
-              <Layers className="h-3.5 w-3.5 text-slate-500" />
-              Nhóm chỉ số (Category)
-            </label>
-            <select
-              id="filter-metric-category"
-              value={selectedCategory}
-              onChange={(e) => setSelectedCategory(e.target.value)}
-              className="w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-900 focus:border-indigo-600 focus:outline-hidden focus:ring-1 focus:ring-indigo-600"
-            >
-              <option value="all">Tất cả các nhóm</option>
-              {Object.entries(METRIC_CATEGORY_LABELS).map(([catKey, catMeta]) => (
-                <option key={catKey} value={catKey}>
-                  {catMeta.label}
-                </option>
-              ))}
-            </select>
-          </div>
+          <select
+            value={selectedScope}
+            onChange={(e) => setSelectedScope(e.target.value)}
+            className="block w-full rounded-xl border border-slate-300 py-2 pl-3 pr-10 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 appearance-none bg-white"
+          >
+            <option value="all">Tất cả Phạm vi</option>
+            {Object.entries(MEASUREMENT_SCOPE_LABELS).map(([k, v]) => (
+              <option key={k} value={k}>{v}</option>
+            ))}
+          </select>
 
-          {/* Filter 3: Active / Inactive Status */}
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1 flex items-center gap-1.5">
-              <Power className="h-3.5 w-3.5 text-slate-500" />
-              Trạng thái áp dụng
-            </label>
+          <div className="flex items-center gap-2">
             <select
-              id="filter-metric-status"
               value={selectedStatus}
               onChange={(e) => setSelectedStatus(e.target.value as any)}
-              className="w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-900 focus:border-indigo-600 focus:outline-hidden focus:ring-1 focus:ring-indigo-600"
+              className="block flex-1 rounded-xl border border-slate-300 py-2 pl-3 pr-10 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 appearance-none bg-white"
             >
-              <option value="all">Tất cả trạng thái</option>
-              <option value="active">Đang áp dụng (Active)</option>
-              <option value="inactive">Đã tạm dừng (Inactive)</option>
+              <option value="all">Trạng thái</option>
+              <option value="active">Đang hoạt động</option>
+              <option value="inactive">Đã tạm ngưng</option>
             </select>
-          </div>
-
-          {/* Reset Filters */}
-          <div className="flex items-end">
+            
             <button
-              id="btn-reset-metric-filters"
-              type="button"
-              onClick={handleResetFilters}
-              className="inline-flex w-full items-center justify-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-100 transition-colors"
+              onClick={clearFilters}
+              title="Xóa bộ lọc"
+              className="flex h-9 w-9 items-center justify-center rounded-xl border border-slate-200 bg-slate-50 text-slate-500 hover:bg-slate-100 hover:text-slate-700 transition-colors"
             >
-              <RotateCcw className="h-4 w-4 text-slate-500" />
-              <span>Đặt lại bộ lọc</span>
+              <RotateCcw className="h-4 w-4" />
             </button>
           </div>
         </div>
       </div>
 
-      {/* Main Metric Definitions Table */}
-      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xs">
-        {isLoading ? (
-          <div className="flex flex-col items-center justify-center p-12 text-slate-500">
-            <Loader2 className="h-8 w-8 animate-spin text-indigo-600 mb-3" />
-            <p className="text-sm font-medium">Đang tải danh mục chỉ số đo lường...</p>
-          </div>
-        ) : metrics.length === 0 ? (
-          <div className="flex flex-col items-center justify-center p-12 text-center">
-            <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-indigo-50 text-indigo-700 mb-3">
-              <BarChart3 className="h-6 w-6" />
-            </div>
-            <h3 className="text-base font-bold text-slate-900">Không tìm thấy chỉ số phù hợp</h3>
-            <p className="mt-1 text-sm text-slate-500 max-w-md">
-              Không có chỉ số nào khớp với tiêu chí tìm kiếm hoặc bộ lọc hiện tại. Thử đặt lại bộ lọc hoặc tạo chỉ số mới.
-            </p>
-            <div className="mt-4 flex gap-3">
-              <button
-                onClick={handleResetFilters}
-                className="rounded-lg border border-slate-300 px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
-              >
-                Xóa bộ lọc
-              </button>
-              <button
-                onClick={onNavigateNew}
-                className="rounded-lg bg-indigo-900 px-3.5 py-2 text-xs font-semibold text-white hover:bg-indigo-800"
-              >
-                + Thêm chỉ số mới
-              </button>
-            </div>
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm text-slate-600 border-collapse">
-              <thead className="border-b border-slate-200 bg-slate-50/80 text-xs font-semibold uppercase tracking-wider text-slate-500">
+      {/* Main Data Table */}
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+        <div className="overflow-x-auto min-h-[400px]">
+          <table className="w-full text-left text-sm text-slate-600">
+            <thead className="bg-slate-50 text-xs font-semibold uppercase text-slate-700">
+              <tr>
+                <th scope="col" className="px-6 py-4">Chỉ số đo lường</th>
+                <th scope="col" className="px-6 py-4">Đơn vị quản lý</th>
+                <th scope="col" className="px-6 py-4 hidden md:table-cell">Phạm vi</th>
+                <th scope="col" className="px-6 py-4 hidden lg:table-cell">Loại dữ liệu / Tần suất</th>
+                <th scope="col" className="px-6 py-4 text-center">Trạng thái</th>
+                <th scope="col" className="px-6 py-4 text-right">Thao tác</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-200">
+              {isLoading ? (
                 <tr>
-                  <th scope="col" className="px-4 py-3.5">
-                    Tên chỉ số & Mô tả
-                  </th>
-                  <th scope="col" className="px-3 py-3.5">
-                    Mã chỉ số
-                  </th>
-                  <th scope="col" className="px-3 py-3.5">
-                    Đơn vị tính
-                  </th>
-                  <th scope="col" className="px-3 py-3.5">
-                    Nhóm chỉ số
-                  </th>
-                  <th scope="col" className="px-3 py-3.5">
-                    Loại dữ liệu
-                  </th>
-                  <th scope="col" className="px-3 py-3.5">
-                    Tần suất
-                  </th>
-                  <th scope="col" className="px-3 py-3.5 text-center">
-                    Trạng thái
-                  </th>
-                  <th scope="col" className="px-4 py-3.5 text-right">
-                    Thao tác
-                  </th>
+                  <td colSpan={6} className="px-6 py-20 text-center">
+                    <div className="flex flex-col items-center justify-center text-slate-500">
+                      <Loader2 className="h-8 w-8 animate-spin text-indigo-500 mb-4" />
+                      <p className="font-medium">Đang tải dữ liệu chỉ số...</p>
+                    </div>
+                  </td>
                 </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {metrics.map((metric) => {
-                  const isOperating = actionLoadingId === metric.id;
-
-                  return (
-                    <tr
-                      key={metric.id}
-                      id={`metric-row-${metric.id}`}
-                      className={`hover:bg-slate-50/80 transition-colors ${
-                        !metric.is_active ? 'bg-slate-50/40 opacity-75' : ''
-                      }`}
-                    >
-                      {/* 1. Tên chỉ số */}
-                      <td className="px-4 py-3.5">
-                        <div className="flex flex-col">
-                          <button
-                            type="button"
-                            onClick={() => setPreviewMetric(metric)}
-                            className="text-left font-semibold text-slate-900 hover:text-indigo-700 line-clamp-1 transition-colors"
-                          >
-                            {metric.name}
-                          </button>
-                          {metric.description ? (
-                            <span className="mt-0.5 text-xs text-slate-500 line-clamp-1">
-                              {metric.description}
-                            </span>
+              ) : metrics.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="px-6 py-20 text-center">
+                    <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-slate-100 mb-4">
+                      <BarChart3 className="h-8 w-8 text-slate-400" />
+                    </div>
+                    <p className="text-base font-semibold text-slate-900 mb-1">Không tìm thấy chỉ số nào</p>
+                    <p className="text-sm text-slate-500 max-w-md mx-auto">
+                      Thay đổi bộ lọc tìm kiếm hoặc tạo chỉ số mới để bắt đầu thiết lập KPI cho tổ chức.
+                    </p>
+                  </td>
+                </tr>
+              ) : (
+                metrics.map((metric) => (
+                  <tr key={metric.id} className="hover:bg-slate-50/50 transition-colors group">
+                    <td className="px-6 py-4 align-top">
+                      <div className="flex flex-col gap-1.5">
+                        <span className="font-bold text-slate-900 line-clamp-2" title={metric.name}>
+                          {metric.name}
+                        </span>
+                        <div className="flex items-center gap-2">
+                          <code className="rounded bg-slate-100 px-1.5 py-0.5 text-xs font-mono text-slate-600 border border-slate-200">
+                            {metric.code}
+                          </code>
+                          <MetricCategoryBadge category={metric.category as string} />
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-6 py-4 align-top">
+                      <div className="flex items-start gap-2">
+                        <Building2 className="h-4 w-4 text-slate-400 shrink-0 mt-0.5" />
+                        <span className="font-medium text-slate-700">
+                          {getUnitName(metric.organization_unit_id)}
+                        </span>
+                      </div>
+                    </td>
+                    <td className="px-6 py-4 align-top hidden md:table-cell">
+                      <span className="inline-flex items-center rounded-full bg-blue-50 px-2.5 py-0.5 text-xs font-medium text-blue-700 border border-blue-200">
+                        {MEASUREMENT_SCOPE_LABELS[(metric as any).measurement_scope || 'individual'] || (metric as any).measurement_scope}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4 align-top hidden lg:table-cell">
+                      <div className="flex flex-col gap-2">
+                        <MetricDataTypeBadge dataType={metric.data_type as string} unit={metric.unit} />
+                        <MetricFrequencyBadge frequency={metric.frequency as string} />
+                      </div>
+                    </td>
+                    <td className="px-6 py-4 align-top text-center">
+                      <MetricStatusBadge isActive={metric.is_active} />
+                    </td>
+                    <td className="px-6 py-4 align-top text-right">
+                      <div className="flex items-center justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button
+                          onClick={() => setPreviewMetric(metric)}
+                          className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors"
+                          title="Xem chi tiết"
+                        >
+                          <Eye className="h-4 w-4" />
+                        </button>
+                        <button
+                          onClick={() => onNavigateEdit(metric.id)}
+                          className="p-1.5 text-slate-400 hover:text-amber-600 hover:bg-amber-50 rounded-lg transition-colors"
+                          title="Chỉnh sửa cấu hình"
+                        >
+                          <Edit3 className="h-4 w-4" />
+                        </button>
+                        <button
+                          onClick={() => handleToggleActive(metric.id, metric.is_active)}
+                          disabled={actionLoadingId === metric.id}
+                          className={`p-1.5 rounded-lg transition-colors ${
+                            metric.is_active 
+                              ? 'text-slate-400 hover:text-red-600 hover:bg-red-50' 
+                              : 'text-slate-400 hover:text-emerald-600 hover:bg-emerald-50'
+                          }`}
+                          title={metric.is_active ? "Tạm ngưng chỉ số" : "Kích hoạt lại"}
+                        >
+                          {actionLoadingId === metric.id ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
                           ) : (
-                            <span className="mt-0.5 text-[11px] text-slate-400 italic">
-                              Chưa có mô tả chi tiết
-                            </span>
+                            <Power className="h-4 w-4" />
                           )}
-
-                          {/* Unit badge / info */}
-                          <div className="mt-1 flex items-center gap-2">
-                            {metric.unit_info ? (
-                              <span className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-600 bg-slate-100 px-1.5 py-0.5 rounded">
-                                <Building2 className="h-3 w-3 text-slate-500" />
-                                {metric.unit_info.name}
-                              </span>
-                            ) : (
-                              <span className="text-[11px] text-slate-500">
-                                Áp dụng toàn trường
-                              </span>
-                            )}
-                            <MetricTargetDirectionBadge direction={metric.target_direction} />
-                          </div>
-                        </div>
-                      </td>
-
-                      {/* 2. Mã */}
-                      <td className="px-3 py-3.5">
-                        <span className="inline-block font-mono text-xs font-semibold px-2 py-0.5 rounded bg-slate-100 text-slate-800 border border-slate-200">
-                          {metric.code}
-                        </span>
-                      </td>
-
-                      {/* 3. Đơn vị */}
-                      <td className="px-3 py-3.5 font-medium text-slate-800">
-                        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs bg-indigo-50/50 text-indigo-900 border border-indigo-100/60 font-semibold">
-                          {metric.unit}
-                        </span>
-                      </td>
-
-                      {/* 4. Nhóm */}
-                      <td className="px-3 py-3.5">
-                        <MetricCategoryBadge category={metric.category} />
-                      </td>
-
-                      {/* 5. Loại dữ liệu */}
-                      <td className="px-3 py-3.5">
-                        <MetricDataTypeBadge dataType={metric.data_type} />
-                      </td>
-
-                      {/* 6. Tần suất */}
-                      <td className="px-3 py-3.5">
-                        <MetricFrequencyBadge frequency={metric.frequency} />
-                      </td>
-
-                      {/* 7. Trạng thái */}
-                      <td className="px-3 py-3.5 text-center">
-                        <MetricStatusBadge isActive={metric.is_active} />
-                      </td>
-
-                      {/* 8. Thao tác */}
-                      <td className="px-4 py-3.5 text-right">
-                        <div className="flex items-center justify-end gap-1.5">
-                          {/* Quick view detail */}
-                          <button
-                            type="button"
-                            onClick={() => setPreviewMetric(metric)}
-                            title="Xem chi tiết"
-                            className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-800 transition-colors"
-                          >
-                            <Eye className="h-4 w-4" />
-                          </button>
-
-                          {/* Edit button */}
-                          <button
-                            type="button"
-                            id={`btn-edit-metric-${metric.id}`}
-                            onClick={() => onNavigateEdit(metric.id)}
-                            title="Chỉnh sửa cấu hình chỉ số"
-                            className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-indigo-50 hover:text-indigo-700 hover:border-indigo-200 transition-colors shadow-2xs"
-                          >
-                            <Edit3 className="h-3.5 w-3.5" />
-                            <span>Sửa</span>
-                          </button>
-
-                          {/* Toggle Active / Inactive Button */}
-                          <button
-                            type="button"
-                            id={`btn-toggle-metric-${metric.id}`}
-                            onClick={() => handleToggleStatus(metric)}
-                            disabled={isOperating}
-                            title={
-                              metric.is_active
-                                ? 'Tạm dừng chỉ số (không xóa dữ liệu đã có)'
-                                : 'Kích hoạt lại chỉ số'
-                            }
-                            className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition-colors shadow-2xs ${
-                              metric.is_active
-                                ? 'border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100'
-                                : 'border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100'
-                            } ${isOperating ? 'opacity-50 cursor-not-allowed' : ''}`}
-                          >
-                            {isOperating ? (
-                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                            ) : (
-                              <Power className="h-3.5 w-3.5" />
-                            )}
-                            <span>{metric.is_active ? 'Tắt' : 'Bật'}</span>
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
-      {/* Preservation & Compliance Notice */}
-      <div className="flex items-start gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs text-slate-600">
-        <Info className="h-5 w-5 text-indigo-700 shrink-0 mt-0.5" />
-        <div className="space-y-1">
-          <p className="font-semibold text-slate-800">
-            Chính sách Toàn vẹn Dữ liệu & Kiểm toán Chỉ số (Audit Safety):
-          </p>
-          <p>
-            Hệ thống không xóa vật lý các chỉ số đã từng phát sinh dữ liệu đo lường. Khi một chỉ số không còn áp dụng trong năm học mới, vui lòng bấm nút <strong>Tắt</strong> để chuyển trạng thái sang <code className="font-mono bg-slate-200 px-1 py-0.5 rounded text-slate-800">is_active = false</code>. Toàn bộ lịch sử số liệu <code className="font-mono bg-slate-200 px-1 py-0.5 rounded text-slate-800">metric_entries</code> trước đó sẽ luôn được bảo tồn nguyên vẹn.
-          </p>
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
 
-      {/* Quick Preview Detail Modal */}
+      {/* Preview Modal (Read Only) */}
       {previewMetric && (
-        <div
-          id="metric-preview-modal"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4"
-          onClick={() => setPreviewMetric(null)}
-        >
-          <div
-            className="w-full max-w-2xl rounded-2xl border border-slate-200 bg-white p-6 shadow-xl space-y-5 max-h-[90vh] overflow-y-auto"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {/* Modal Header */}
-            <div className="flex items-start justify-between border-b border-slate-100 pb-4">
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="font-mono text-xs font-bold px-2 py-0.5 rounded bg-indigo-50 text-indigo-700 border border-indigo-200">
-                    {previewMetric.code}
-                  </span>
-                  <MetricStatusBadge isActive={previewMetric.is_active} />
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm animate-in fade-in p-4 sm:p-6">
+          <div className="w-full max-w-2xl bg-white rounded-2xl shadow-xl overflow-hidden animate-in zoom-in-95">
+            <div className="flex items-center justify-between border-b border-slate-100 px-6 py-4 bg-slate-50/50">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-100 text-indigo-600">
+                  <BarChart3 className="h-5 w-5" />
                 </div>
-                <h3 className="mt-2 text-lg font-bold text-slate-900">
-                  {previewMetric.name}
-                </h3>
+                <div>
+                  <h3 className="text-lg font-bold text-slate-900">Chi tiết Chỉ số</h3>
+                  <code className="text-xs font-mono text-slate-500">{previewMetric.code}</code>
+                </div>
               </div>
-
-              <button
-                onClick={() => setPreviewMetric(null)}
-                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
-              >
-                ✕
-              </button>
+              <MetricStatusBadge isActive={previewMetric.is_active} />
             </div>
 
-            {/* Modal Body Info Grid */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
-              <div className="rounded-lg bg-slate-50 p-3 space-y-1">
-                <span className="text-slate-500 font-medium">Nhóm chỉ số:</span>
-                <div>
-                  <MetricCategoryBadge category={previewMetric.category} />
+            <div className="px-6 py-6 space-y-6 max-h-[70vh] overflow-y-auto">
+              <div>
+                <h4 className="text-base font-bold text-slate-900 mb-1">{previewMetric.name}</h4>
+                <p className="text-sm text-slate-600 whitespace-pre-wrap">{previewMetric.description || 'Không có mô tả.'}</p>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-6 pt-4 border-t border-slate-100">
+                <div className="space-y-1">
+                  <span className="text-xs font-medium text-slate-500 uppercase tracking-wider">Đơn vị quản lý</span>
+                  <p className="text-sm font-semibold text-slate-900">{getUnitName(previewMetric.organization_unit_id)}</p>
                 </div>
-              </div>
-
-              <div className="rounded-lg bg-slate-50 p-3 space-y-1">
-                <span className="text-slate-500 font-medium">Đơn vị đo lường:</span>
-                <p className="font-bold text-slate-900 text-sm">{previewMetric.unit}</p>
-              </div>
-
-              <div className="rounded-lg bg-slate-50 p-3 space-y-1">
-                <span className="text-slate-500 font-medium">Loại dữ liệu:</span>
-                <div>
-                  <MetricDataTypeBadge dataType={previewMetric.data_type} />
+                <div className="space-y-1">
+                  <span className="text-xs font-medium text-slate-500 uppercase tracking-wider">Nhóm chỉ số</span>
+                  <div className="pt-1"><MetricCategoryBadge category={previewMetric.category as string} /></div>
                 </div>
-              </div>
-
-              <div className="rounded-lg bg-slate-50 p-3 space-y-1">
-                <span className="text-slate-500 font-medium">Tần suất thu thập:</span>
-                <div>
-                  <MetricFrequencyBadge frequency={previewMetric.frequency} />
+                <div className="space-y-1">
+                  <span className="text-xs font-medium text-slate-500 uppercase tracking-wider">Phạm vi</span>
+                  <p className="text-sm font-semibold text-slate-900">{MEASUREMENT_SCOPE_LABELS[(previewMetric as any).measurement_scope || 'individual']}</p>
                 </div>
-              </div>
-
-              <div className="rounded-lg bg-slate-50 p-3 space-y-1">
-                <span className="text-slate-500 font-medium">Phương pháp tổng hợp:</span>
-                <p className="font-semibold text-slate-800 uppercase">{previewMetric.aggregation_type}</p>
-              </div>
-
-              <div className="rounded-lg bg-slate-50 p-3 space-y-1">
-                <span className="text-slate-500 font-medium">Chiều hướng mục tiêu:</span>
-                <div>
-                  <MetricTargetDirectionBadge direction={previewMetric.target_direction} />
-                </div>
-              </div>
-
-              <div className="rounded-lg bg-slate-50 p-3 space-y-1 sm:col-span-2">
-                <span className="text-slate-500 font-medium">Đơn vị áp dụng / phụ trách:</span>
-                <p className="font-semibold text-slate-800">
-                  {previewMetric.unit_info ? `${previewMetric.unit_info.name} (${previewMetric.unit_info.code})` : 'Áp dụng chung toàn trường'}
-                </p>
-              </div>
-
-              <div className="rounded-lg bg-slate-50 p-3 space-y-1 sm:col-span-2">
-                <span className="text-slate-500 font-medium">Mô tả & Hướng dẫn thu thập:</span>
-                <p className="text-slate-700 leading-relaxed">
-                  {previewMetric.description || 'Chưa có mô tả chi tiết cho chỉ số này.'}
-                </p>
-              </div>
-
-              <div className="rounded-lg bg-slate-50 p-3 space-y-1 sm:col-span-2 flex items-center justify-between">
-                <div>
-                  <span className="text-slate-500 font-medium">Nhập liệu thủ công:</span>
-                  <p className="font-semibold text-slate-800">
-                    {previewMetric.allow_manual_entry ? 'Cho phép nhập liệu qua giao diện' : 'Chỉ cập nhật qua hệ thống / API'}
+                <div className="space-y-1">
+                  <span className="text-xs font-medium text-slate-500 uppercase tracking-wider">Dữ liệu & Đơn vị</span>
+                  <p className="text-sm font-semibold text-slate-900">
+                    {METRIC_DATA_TYPE_LABELS[previewMetric.data_type as string] || previewMetric.data_type} ({previewMetric.unit})
                   </p>
                 </div>
-                <div>
-                  <span className="text-slate-500 font-medium">Thứ tự sắp xếp:</span>
-                  <p className="font-semibold text-slate-800 text-right">{previewMetric.sort_order}</p>
+                <div className="space-y-1">
+                  <span className="text-xs font-medium text-slate-500 uppercase tracking-wider">Tần suất</span>
+                  <p className="text-sm font-semibold text-slate-900">{METRIC_FREQUENCY_LABELS[previewMetric.frequency as string] || previewMetric.frequency}</p>
+                </div>
+                <div className="space-y-1">
+                  <span className="text-xs font-medium text-slate-500 uppercase tracking-wider">Nguồn dữ liệu</span>
+                  <p className="text-sm font-semibold text-slate-900">{(previewMetric as any).source_type || 'manual'}</p>
                 </div>
               </div>
             </div>
 
-            {/* Modal Actions */}
-            <div className="flex items-center justify-end gap-3 border-t border-slate-100 pt-4">
+            <div className="flex items-center justify-end gap-3 px-6 py-4 bg-slate-50 border-t border-slate-100">
               <button
-                type="button"
                 onClick={() => setPreviewMetric(null)}
-                className="rounded-lg border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                className="px-4 py-2 text-sm font-medium text-slate-600 bg-white border border-slate-300 rounded-xl hover:bg-slate-50 transition-colors"
               >
                 Đóng
               </button>
               <button
-                type="button"
                 onClick={() => {
-                  const id = previewMetric.id;
                   setPreviewMetric(null);
-                  onNavigateEdit(id);
+                  onNavigateEdit(previewMetric.id);
                 }}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-900 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-800 shadow-xs"
+                className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-xl hover:bg-indigo-700 transition-colors shadow-sm"
               >
-                <Edit3 className="h-3.5 w-3.5" />
-                <span>Chỉnh sửa chỉ số</span>
+                <Edit3 className="h-4 w-4" />
+                Chỉnh sửa
               </button>
             </div>
           </div>

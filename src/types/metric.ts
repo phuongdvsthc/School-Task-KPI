@@ -18,6 +18,18 @@ export type MetricCategory =
   | 'quality_assurance'     // Khảo thí & Đảm bảo chất lượng
   | 'other';                // Khác
 
+export type MeasurementScope =
+  | 'individual'
+  | 'unit'
+  | 'organization';
+
+export type MetricSourceType =
+  | 'manual'
+  | 'task'
+  | 'import'
+  | 'api'
+  | 'system';
+
 export type MetricDataType = 
   | 'number'                // Số thực / Số nguyên
   | 'percentage'            // Phần trăm (%)
@@ -60,6 +72,10 @@ export interface MetricDefinition {
   name: string;
   description: string | null;
   category: MetricCategory | string;
+  measurement_scope: MeasurementScope | string;
+  source_type?: MetricSourceType | string;
+  measurement_scope: MeasurementScope | string;
+  source_type: MetricSourceType | string;
   data_type: MetricDataType | string;
   unit: string;
   aggregation_type: MetricAggregationType | string;
@@ -129,6 +145,8 @@ export interface UpdateMetricDefinitionPayload {
   organization_unit_id?: string | null;
   description?: string | null;
   category?: MetricCategory | string;
+  measurement_scope?: MeasurementScope | string;
+  source_type?: MetricSourceType | string;
   data_type?: MetricDataType | string;
   unit?: string;
   aggregation_type?: MetricAggregationType | string;
@@ -145,6 +163,7 @@ export interface UpdateMetricDefinitionPayload {
 export interface MetricFilterOptions {
   organization_unit_id?: string;
   category?: string;
+  measurement_scope?: string;
   is_active?: boolean;
   search_query?: string;
 }

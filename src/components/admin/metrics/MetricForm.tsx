@@ -1,19 +1,6 @@
 /**
  * MetricForm Component
  * Xử lý biểu mẫu Tạo mới (/admin/metrics/new) và Chỉnh sửa (/admin/metrics/[id]/edit)
- * Các trường:
- * - name
- * - code
- * - organization_unit_id
- * - description
- * - category
- * - data_type
- * - unit
- * - aggregation_type
- * - frequency
- * - target_direction
- * - allow_manual_entry
- * - sort_order
  */
 import React, { useState, useEffect } from 'react';
 import { 
@@ -25,13 +12,11 @@ import {
   MetricFrequency,
   MetricTargetDirection,
   METRIC_CATEGORY_LABELS,
-  METRIC_DATA_TYPE_LABELS,
-  METRIC_AGGREGATION_LABELS,
-  METRIC_FREQUENCY_LABELS,
-  METRIC_TARGET_DIRECTION_LABELS
+  MeasurementScope,
+  MetricSourceType
 } from '../../../types/metric';
 import { OrganizationUnit } from '../../../types/database';
-import { metricService } from '../../../services/metricService';
+import { metricService, metricHasEntries } from '../../../services/metricService';
 import { organizationService } from '../../../services/organizationService';
 import { useAuth } from '../../../context/AuthContext';
 import { 
@@ -47,7 +32,8 @@ import {
   Sliders, 
   Compass, 
   Calendar,
-  Hash
+  Hash,
+  Database
 } from 'lucide-react';
 
 interface MetricFormProps {
@@ -57,14 +43,48 @@ interface MetricFormProps {
   onSuccess: (metricId?: string) => void;
 }
 
-const COMMON_UNIT_SUGGESTIONS: Record<string, string[]> = {
-  percentage: ['%', 'tỷ lệ %', '% hoàn thành'],
-  number: ['giờ chuẩn', 'tiết', 'điểm', 'tín chỉ', 'đề tài', 'chỉ số'],
-  currency: ['VNĐ', 'triệu VNĐ', 'nghìn VNĐ'],
-  count: ['bài báo', 'người', 'sinh viên', 'giảng viên', 'hồ sơ', 'vụ việc', 'lượt', 'sự kiện'],
-  boolean: ['Đạt/Không đạt', 'Có/Không'],
-  ratio: ['tỷ số', 'sinh viên / giảng viên'],
-  time_hours: ['giờ', 'ngày công', 'phút'],
+const MEASUREMENT_SCOPE_LABELS: Record<string, string> = {
+  individual: 'Cá nhân',
+  unit: 'Đơn vị',
+  organization: 'Toàn trường'
+};
+
+const DATA_TYPE_LABELS: Record<string, string> = {
+  number: 'Số',
+  percentage: 'Tỷ lệ %',
+  currency: 'Tiền tệ',
+  time_hours: 'Thời lượng'
+};
+
+const AGGREGATION_LABELS: Record<string, string> = {
+  sum: 'Tổng',
+  avg: 'Trung bình',
+  max: 'Cao nhất',
+  min: 'Thấp nhất',
+  latest: 'Giá trị mới nhất'
+};
+
+const FREQUENCY_LABELS: Record<string, string> = {
+  daily: 'Hàng ngày',
+  weekly: 'Hàng tuần',
+  monthly: 'Hàng tháng',
+  quarterly: 'Hàng quý',
+  yearly: 'Hàng năm',
+  manual: 'Không theo chu kỳ cố định'
+};
+
+const TARGET_DIRECTION_LABELS: Record<string, string> = {
+  higher_better: 'Càng cao càng tốt',
+  lower_better: 'Càng thấp càng tốt',
+  neutral: 'Chỉ theo dõi'
+};
+
+const SOURCE_TYPE_LABELS: Record<string, string> = {
+  manual: 'Nhập thủ công',
+  task: 'Lấy từ công việc',
+  import: 'Import dữ liệu',
+  api: 'API',
+  system: 'Hệ thống tự tính'
 };
 
 export const MetricForm: React.FC<MetricFormProps> = ({
@@ -79,6 +99,7 @@ export const MetricForm: React.FC<MetricFormProps> = ({
   const [isLoading, setIsLoading] = useState<boolean>(mode === 'edit');
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [hasEntries, setHasEntries] = useState<boolean>(false);
 
   // Form Fields State
   const [name, setName] = useState<string>('');
@@ -86,150 +107,144 @@ export const MetricForm: React.FC<MetricFormProps> = ({
   const [organizationUnitId, setOrganizationUnitId] = useState<string>('');
   const [description, setDescription] = useState<string>('');
   const [category, setCategory] = useState<MetricCategory>('teaching');
+  
+  const [measurementScope, setMeasurementScope] = useState<MeasurementScope>('individual');
   const [dataType, setDataType] = useState<MetricDataType>('number');
-  const [unit, setUnit] = useState<string>('giờ chuẩn');
+  const [unit, setUnit] = useState<string>('');
   const [aggregationType, setAggregationType] = useState<MetricAggregationType>('sum');
-  const [frequency, setFrequency] = useState<MetricFrequency>('semester');
-  const [targetDirection, setTargetDirection] = useState<MetricTargetDirection>('higher_is_better');
+  const [frequency, setFrequency] = useState<MetricFrequency | 'manual'>('monthly');
+  const [targetDirection, setTargetDirection] = useState<MetricTargetDirection | 'higher_better' | 'lower_better' | 'neutral'>('higher_better');
+  const [sourceType, setSourceType] = useState<MetricSourceType>('manual');
+  
   const [allowManualEntry, setAllowManualEntry] = useState<boolean>(true);
   const [sortOrder, setSortOrder] = useState<number>(0);
   const [isActive, setIsActive] = useState<boolean>(true);
 
-  // Auto-suggest code generator based on category & name
+  // Auto-suggest code generator based on name
   const handleAutoGenerateCode = () => {
     if (!name.trim()) return;
-    const catPrefix = {
-      teaching: 'METRIC_TEACH',
-      scientific_research: 'METRIC_RES',
-      administration: 'METRIC_ADM',
-      finance: 'METRIC_FIN',
-      student_affairs: 'METRIC_STU',
-      facilities: 'METRIC_FAC',
-      quality_assurance: 'METRIC_QA',
-      other: 'METRIC_GEN',
-    }[category] || 'METRIC';
-
-    // Normalize Vietnamese diacritics
-    const normalizedName = name
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .replace(/đ/g, 'd')
-      .replace(/Đ/g, 'D')
-      .toUpperCase()
-      .replace(/[^A-Z0-9]/g, '_')
-      .replace(/_+/g, '_')
-      .substring(0, 20);
-
-    const generatedCode = `${catPrefix}_${normalizedName}_${Math.floor(Math.random() * 900 + 100)}`;
-    setCode(generatedCode);
+    const cleanStr = name.trim().toUpperCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // remove accents
+      .replace(/Đ/g, "D")
+      .replace(/[^A-Z0-9 ]/g, "")
+      .replace(/\s+/g, "_");
+    setCode(cleanStr);
   };
 
-  // When data type changes, suggest relevant unit if user hasn't typed custom
-  const handleDataTypeChange = (newType: MetricDataType) => {
-    setDataType(newType);
-    const suggestions = COMMON_UNIT_SUGGESTIONS[newType];
-    if (suggestions && suggestions.length > 0) {
-      setUnit(suggestions[0]);
-    }
-  };
-
-  // Load initial data
   useEffect(() => {
-    const fetchData = async () => {
+    const fetchDependencies = async () => {
       try {
-        const unitsData = await organizationService.getUnits().catch(() => []);
-        setUnits(unitsData);
-
+        const orgs = await organizationService.getUnits();
+        setUnits(orgs);
+        
         if (mode === 'edit' && metricId) {
-          const metricData = await metricService.getMetricDefinitionById(metricId);
-          setName(metricData.name || '');
-          setCode(metricData.code || '');
-          setOrganizationUnitId(metricData.organization_unit_id || '');
-          setDescription(metricData.description || '');
-          setCategory((metricData.category as MetricCategory) || 'teaching');
-          setDataType((metricData.data_type as MetricDataType) || 'number');
-          setUnit(metricData.unit || '');
-          setAggregationType((metricData.aggregation_type as MetricAggregationType) || 'sum');
-          setFrequency((metricData.frequency as MetricFrequency) || 'semester');
-          setTargetDirection((metricData.target_direction as MetricTargetDirection) || 'higher_is_better');
-          setAllowManualEntry(metricData.allow_manual_entry ?? true);
-          setSortOrder(metricData.sort_order ?? 0);
-          setIsActive(metricData.is_active ?? true);
+          const metric = await metricService.getMetricDefinitionById(metricId);
+          if (metric) {
+            setName(metric.name);
+            setCode(metric.code);
+            setOrganizationUnitId(metric.organization_unit_id || '');
+            setDescription(metric.description || '');
+            setCategory(metric.category as MetricCategory);
+            
+            // Map legacy or existing values to new fields
+            setMeasurementScope((metric as any).measurement_scope || 'individual');
+            setSourceType((metric as any).source_type || 'manual');
+            
+            setDataType(metric.data_type as MetricDataType);
+            setUnit(metric.unit || '');
+            setAggregationType(metric.aggregation_type as MetricAggregationType);
+            setFrequency(metric.frequency as any);
+            setTargetDirection(metric.target_direction as any);
+            setAllowManualEntry(metric.allow_manual_entry ?? true);
+            setSortOrder(metric.sort_order || 0);
+            setIsActive(metric.is_active ?? true);
+            
+            // Check if metric has entries
+            const entriesExist = await metricHasEntries(metricId);
+            setHasEntries(entriesExist);
+          } else {
+            setErrorMessage('Không tìm thấy thông tin chỉ số.');
+          }
+        } else {
+          // Pre-select first unit if available
+          if (orgs.length > 0) {
+            setOrganizationUnitId(orgs[0].id);
+          }
         }
       } catch (err: any) {
-        console.error('Lỗi khi tải dữ liệu biểu mẫu:', err);
-        setErrorMessage(err.message || 'Không thể tải thông tin chỉ số');
+        setErrorMessage('Lỗi khi tải dữ liệu: ' + err.message);
       } finally {
         setIsLoading(false);
       }
     };
-
-    fetchData();
+    fetchDependencies();
   }, [mode, metricId]);
+
+  // Handle source type change side effect
+  useEffect(() => {
+    if (sourceType !== 'manual') {
+      setAllowManualEntry(false);
+    }
+  }, [sourceType]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
 
-    // Basic Validation
-    if (!name.trim()) {
-      setErrorMessage('Vui lòng nhập tên chỉ số đo lường.');
-      return;
+    // Validation
+    if (!name.trim()) return setErrorMessage('Vui lòng nhập tên chỉ số.');
+    if (!code.trim()) return setErrorMessage('Vui lòng nhập mã chỉ số.');
+    if (!organizationUnitId) return setErrorMessage('Vui lòng chọn Đơn vị quản lý.');
+    if (!measurementScope) return setErrorMessage('Vui lòng chọn Phạm vi đo lường.');
+    if (!dataType) return setErrorMessage('Vui lòng chọn Loại dữ liệu.');
+    if (!aggregationType) return setErrorMessage('Vui lòng chọn Phương pháp tổng hợp.');
+    if (!frequency) return setErrorMessage('Vui lòng chọn Tần suất đo lường.');
+    if (!targetDirection) return setErrorMessage('Vui lòng chọn Chiều hướng mục tiêu.');
+    if (!unit.trim()) return setErrorMessage('Vui lòng nhập Đơn vị tính.');
+
+    if (measurementScope === 'organization') {
+      const selectedOrg = units.find(u => u.id === organizationUnitId);
+      if (selectedOrg && selectedOrg.unit_type !== 'school') {
+        return setErrorMessage('Phạm vi đo lường Toàn trường yêu cầu Đơn vị quản lý phải là cấp Trường (School).');
+      }
     }
-    if (!code.trim()) {
-      setErrorMessage('Vui lòng nhập mã chỉ số.');
-      return;
-    }
-    if (!unit.trim()) {
-      setErrorMessage('Vui lòng nhập đơn vị tính.');
-      return;
-    }
+
+    // Clean code format: A-Z 0-9 _
+    const cleanedCode = code.trim().toUpperCase().replace(/\s+/g, "_").replace(/[^A-Z0-9_]/g, "");
 
     setIsSubmitting(true);
-
     try {
+      const payload: any = {
+        name: name.trim(),
+        code: cleanedCode,
+        organization_unit_id: organizationUnitId,
+        description: description.trim() || null,
+        category,
+        measurement_scope: measurementScope,
+        data_type: dataType,
+        unit: unit.trim(),
+        aggregation_type: aggregationType,
+        frequency,
+        target_direction: targetDirection,
+        source_type: sourceType,
+        allow_manual_entry: allowManualEntry,
+        sort_order: sortOrder,
+        is_active: isActive
+      };
+
       if (mode === 'create') {
-        const payload: CreateMetricDefinitionPayload = {
-          name: name.trim(),
-          code: code.trim().toUpperCase(),
-          organization_unit_id: organizationUnitId || null,
-          description: description.trim() || null,
-          category,
-          data_type: dataType,
-          unit: unit.trim(),
-          aggregation_type: aggregationType,
-          frequency,
-          target_direction: targetDirection,
-          allow_manual_entry: allowManualEntry,
-          sort_order: Number(sortOrder) || 0,
-          is_active: isActive,
-        };
-
-        const created = await metricService.createMetricDefinition(payload, user?.id);
-        onSuccess(created.id);
-      } else if (mode === 'edit' && metricId) {
-        const updates: UpdateMetricDefinitionPayload = {
-          name: name.trim(),
-          code: code.trim().toUpperCase(),
-          organization_unit_id: organizationUnitId || null,
-          description: description.trim() || null,
-          category,
-          data_type: dataType,
-          unit: unit.trim(),
-          aggregation_type: aggregationType,
-          frequency,
-          target_direction: targetDirection,
-          allow_manual_entry: allowManualEntry,
-          sort_order: Number(sortOrder) || 0,
-          is_active: isActive,
-        };
-
-        await metricService.updateMetricDefinition(metricId, updates);
+        const res = await metricService.createMetricDefinition(payload, user?.id);
+        onSuccess(res.id);
+      } else if (metricId) {
+        await metricService.updateMetricDefinition(metricId, payload);
         onSuccess(metricId);
       }
     } catch (err: any) {
-      console.error('Lỗi khi lưu chỉ số:', err);
-      setErrorMessage(err.message || 'Đã xảy ra lỗi khi lưu thông tin chỉ số.');
+      if (err.message?.includes('duplicate key') || err.message?.includes('metric_definitions_code_organization_key')) {
+        setErrorMessage('Mã chỉ số này đã tồn tại trong Đơn vị quản lý. Vui lòng chọn mã khác.');
+      } else {
+        setErrorMessage(err.message || 'Có lỗi xảy ra khi lưu chỉ số.');
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -237,401 +252,333 @@ export const MetricForm: React.FC<MetricFormProps> = ({
 
   if (isLoading) {
     return (
-      <div className="flex flex-col items-center justify-center p-16 text-slate-500">
-        <Loader2 className="h-8 w-8 animate-spin text-indigo-600 mb-3" />
-        <p className="text-sm font-medium">Đang tải dữ liệu chỉ số đo lường...</p>
+      <div className="flex justify-center items-center py-20 text-indigo-600">
+        <Loader2 className="h-8 w-8 animate-spin" />
+        <span className="ml-3 font-medium">Đang tải dữ liệu...</span>
       </div>
     );
   }
 
-  const currentRoute = mode === 'create' ? '/admin/metrics/new' : `/admin/metrics/${metricId || ':id'}/edit`;
-
   return (
-    <div id="metric-form-container" className="mx-auto max-w-4xl space-y-6">
-      {/* Navigation Breadcrumb & Header */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-b border-slate-200 pb-4">
-        <div>
+    <div className="mx-auto max-w-4xl space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
           <button
-            type="button"
             onClick={onBack}
-            className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-500 hover:text-slate-900 transition-colors mb-1"
+            className="flex h-9 w-9 items-center justify-center rounded-lg bg-white border border-slate-200 text-slate-500 hover:text-slate-700 hover:bg-slate-50 transition-colors shadow-sm"
           >
-            <ArrowLeft className="h-3.5 w-3.5" />
-            <span>Quay lại danh sách chỉ số (/admin/metrics)</span>
+            <ArrowLeft className="h-5 w-5" />
           </button>
-
-          <div className="flex items-center gap-2">
-            <h1 className="text-2xl font-bold text-slate-900 tracking-tight">
-              {mode === 'create' ? 'Tạo Chỉ Số Đo Lường Mới' : 'Chỉnh Sửa Cấu Hình Chỉ Số'}
+          <div>
+            <h1 className="text-xl font-bold text-slate-900">
+              {mode === 'create' ? 'Tạo mới Chỉ số đo lường' : 'Cập nhật Chỉ số đo lường'}
             </h1>
-            <span className="font-mono text-xs px-2 py-0.5 rounded bg-slate-100 text-slate-600 border border-slate-200">
-              {currentRoute}
-            </span>
+            <p className="text-sm text-slate-500">
+              Cấu hình các tham số đo lường hiệu suất
+            </p>
           </div>
-          <p className="mt-1 text-sm text-slate-600">
-            {mode === 'create'
-              ? 'Thiết lập chỉ số đo lường mới vào danh mục hệ thống trường học.'
-              : 'Cập nhật định nghĩa, công thức tính toán và phạm vi đơn vị áp dụng.'}
-          </p>
         </div>
-
-        <button
-          type="button"
-          onClick={onBack}
-          className="rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition-colors shadow-2xs self-start"
-        >
-          Hủy bỏ
-        </button>
       </div>
 
-      {/* Error Alert Box */}
-      {errorMessage && (
-        <div className="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-900 shadow-xs">
-          <AlertCircle className="h-5 w-5 text-red-600 shrink-0 mt-0.5" />
-          <div className="space-y-1">
-            <p className="font-semibold">Đã xảy ra lỗi:</p>
-            <p>{errorMessage}</p>
+      <form onSubmit={handleSubmit} className="space-y-6">
+        {errorMessage && (
+          <div className="flex items-start gap-3 rounded-xl bg-red-50 border border-red-200 p-4 text-red-800 animate-in fade-in">
+            <AlertCircle className="h-5 w-5 shrink-0 mt-0.5 text-red-600" />
+            <div className="text-sm leading-relaxed">{errorMessage}</div>
           </div>
-        </div>
-      )}
+        )}
 
-      {/* Main Form */}
-      <form onSubmit={handleSubmit} className="space-y-8">
-        {/* Section 1: Thông tin cơ bản */}
-        <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-xs space-y-6">
-          <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
-            <Layers className="h-5 w-5 text-indigo-700" />
-            <h2 className="text-base font-bold text-slate-900">
-              1. Thông Tin Nhận Diện Chỉ Số
-            </h2>
-          </div>
-
-          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
-            {/* Tên chỉ số (name) */}
-            <div className="sm:col-span-2">
-              <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
-                Tên chỉ số đo lường <span className="text-red-500">*</span>
-              </label>
-              <input
-                id="input-metric-name"
-                type="text"
-                required
-                placeholder="Ví dụ: Tỷ lệ giảng viên đạt chuẩn giờ giảng nghiên cứu khoa học"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-indigo-600 focus:outline-hidden focus:ring-1 focus:ring-indigo-600"
-              />
-              <p className="mt-1 text-xs text-slate-500">
-                Tên rõ ràng, mô tả mục tiêu hoặc đại lượng cần đo lường.
-              </p>
-            </div>
-
-            {/* Mã chỉ số (code) */}
-            <div>
-              <div className="flex items-center justify-between mb-1.5">
-                <label className="block text-xs font-bold uppercase tracking-wider text-slate-700">
-                  Mã chỉ số (Code) <span className="text-red-500">*</span>
-                </label>
-                <button
-                  type="button"
-                  onClick={handleAutoGenerateCode}
-                  className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-700 hover:text-indigo-900"
-                >
-                  <Sparkles className="h-3 w-3" />
-                  <span>Tự sinh mã</span>
-                </button>
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Cột trái: Thông tin cơ bản */}
+          <div className="lg:col-span-2 space-y-6">
+            <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs space-y-5">
+              <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600">
+                  <Building2 className="h-4 w-4" />
+                </div>
+                <h3 className="text-sm font-bold text-slate-900">Thông tin cơ bản</h3>
               </div>
-              <input
-                id="input-metric-code"
-                type="text"
-                required
-                placeholder="METRIC_TEACH_01"
-                value={code}
-                onChange={(e) => setCode(e.target.value.toUpperCase())}
-                className="w-full font-mono uppercase rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-indigo-600 focus:outline-hidden focus:ring-1 focus:ring-indigo-600"
-              />
-              <p className="mt-1 text-xs text-slate-500">
-                Mã duy nhất viết hoa không dấu (ví dụ: <code className="font-mono bg-slate-100 px-1 py-0.5 rounded">METRIC_ADM_01</code>).
-              </p>
-            </div>
 
-            {/* Đơn vị áp dụng (organization_unit_id) */}
-            <div>
-              <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5 flex items-center gap-1">
-                <Building2 className="h-3.5 w-3.5 text-slate-500" />
-                Đơn vị áp dụng / Phụ trách
-              </label>
-              <select
-                id="select-metric-unit"
-                value={organizationUnitId}
-                onChange={(e) => setOrganizationUnitId(e.target.value)}
-                className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 focus:border-indigo-600 focus:outline-hidden focus:ring-1 focus:ring-indigo-600"
-              >
-                <option value="">Áp dụng chung toàn trường</option>
-                {units.map((u) => (
-                  <option key={u.id} value={u.id}>
-                    {u.name} ({u.code})
-                  </option>
-                ))}
-              </select>
-              <p className="mt-1 text-xs text-slate-500">
-                Để trống nếu chỉ số được dùng chung cho tất cả các đơn vị trong trường.
-              </p>
-            </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                <div className="md:col-span-2">
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Tên chỉ số <span className="text-rose-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    onBlur={handleAutoGenerateCode}
+                    placeholder="Nhập tên chỉ số đo lường..."
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                  />
+                </div>
 
-            {/* Mô tả chi tiết (description) */}
-            <div className="sm:col-span-2">
-              <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
-                Mô tả & Hướng dẫn thu thập (Description)
-              </label>
-              <textarea
-                id="textarea-metric-desc"
-                rows={3}
-                placeholder="Nêu rõ phương pháp đếm, công thức tính toán và nguồn dữ liệu kiểm chứng..."
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                className="w-full rounded-lg border border-slate-300 bg-white p-3 text-sm text-slate-900 placeholder:text-slate-400 focus:border-indigo-600 focus:outline-hidden focus:ring-1 focus:ring-indigo-600"
-              />
-            </div>
-          </div>
-        </div>
-
-        {/* Section 2: Cấu hình Đo lường & Loại Dữ liệu */}
-        <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-xs space-y-6">
-          <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
-            <Sliders className="h-5 w-5 text-indigo-700" />
-            <h2 className="text-base font-bold text-slate-900">
-              2. Phương Thức Đo Lường & Dữ Liệu
-            </h2>
-          </div>
-
-          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
-            {/* Nhóm chỉ số (category) */}
-            <div>
-              <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
-                Nhóm chỉ số (Category) <span className="text-red-500">*</span>
-              </label>
-              <select
-                id="select-metric-category"
-                value={category}
-                onChange={(e) => setCategory(e.target.value as MetricCategory)}
-                className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 focus:border-indigo-600 focus:outline-hidden focus:ring-1 focus:ring-indigo-600"
-              >
-                {Object.entries(METRIC_CATEGORY_LABELS).map(([catKey, catMeta]) => (
-                  <option key={catKey} value={catKey}>
-                    {catMeta.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {/* Loại dữ liệu (data_type) */}
-            <div>
-              <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
-                Loại dữ liệu (Data Type) <span className="text-red-500">*</span>
-              </label>
-              <select
-                id="select-metric-data-type"
-                value={dataType}
-                onChange={(e) => handleDataTypeChange(e.target.value as MetricDataType)}
-                className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 focus:border-indigo-600 focus:outline-hidden focus:ring-1 focus:ring-indigo-600"
-              >
-                {Object.entries(METRIC_DATA_TYPE_LABELS).map(([dtKey, dtLabel]) => (
-                  <option key={dtKey} value={dtKey}>
-                    {dtLabel}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {/* Đơn vị tính (unit) */}
-            <div>
-              <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
-                Đơn vị tính (Unit) <span className="text-red-500">*</span>
-              </label>
-              <input
-                id="input-metric-unit"
-                type="text"
-                required
-                placeholder="Ví dụ: %, giờ, bài, người, VNĐ"
-                value={unit}
-                onChange={(e) => setUnit(e.target.value)}
-                className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-indigo-600 focus:outline-hidden focus:ring-1 focus:ring-indigo-600"
-              />
-              {COMMON_UNIT_SUGGESTIONS[dataType] && (
-                <div className="mt-1.5 flex flex-wrap gap-1">
-                  <span className="text-[11px] text-slate-400">Gợi ý:</span>
-                  {COMMON_UNIT_SUGGESTIONS[dataType].map((s) => (
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Mã chỉ số <span className="text-rose-500">*</span>
+                  </label>
+                  <div className="relative">
+                    <input
+                      type="text"
+                      required
+                      value={code}
+                      onChange={(e) => setCode(e.target.value.toUpperCase().replace(/\s+/g, '_').replace(/[^A-Z0-9_]/g, ''))}
+                      placeholder="VD: SO_CUOC_GOI"
+                      className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 font-mono focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 pr-10"
+                    />
                     <button
-                      key={s}
                       type="button"
-                      onClick={() => setUnit(s)}
-                      className="text-[11px] font-medium text-indigo-600 hover:underline bg-indigo-50/60 px-1.5 py-0.2 rounded"
+                      onClick={handleAutoGenerateCode}
+                      className="absolute right-2 top-1.5 p-1 text-slate-400 hover:text-indigo-600 rounded"
+                      title="Tạo mã tự động từ tên"
                     >
-                      {s}
+                      <Sparkles className="h-4 w-4" />
                     </button>
-                  ))}
+                  </div>
+                  <p className="text-[11px] text-slate-500 mt-1">Chỉ chứa A-Z, 0-9 và dấu gạch dưới (_)</p>
                 </div>
-              )}
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Đơn vị quản lý <span className="text-rose-500">*</span>
+                  </label>
+                  <select
+                    required
+                    value={organizationUnitId}
+                    onChange={(e) => setOrganizationUnitId(e.target.value)}
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 bg-white"
+                  >
+                    <option value="">-- Chọn đơn vị --</option>
+                    {units.map((u) => (
+                      <option key={u.id} value={u.id}>{u.name}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="md:col-span-2">
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Nhóm danh mục <span className="text-rose-500">*</span>
+                  </label>
+                  <select
+                    value={category}
+                    onChange={(e) => setCategory(e.target.value as MetricCategory)}
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 bg-white"
+                  >
+                    {Object.entries(METRIC_CATEGORY_LABELS).map(([k, v]) => (
+                      <option key={k} value={k}>{v.label}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="md:col-span-2">
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Mô tả / Hướng dẫn
+                  </label>
+                  <textarea
+                    rows={3}
+                    value={description}
+                    onChange={(e) => setDescription(e.target.value)}
+                    placeholder="Mô tả ý nghĩa của chỉ số và cách thức đo lường..."
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                  />
+                </div>
+              </div>
             </div>
 
-            {/* Phương thức tổng hợp (aggregation_type) */}
-            <div>
-              <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
-                Tổng hợp số liệu (Aggregation) <span className="text-red-500">*</span>
-              </label>
-              <select
-                id="select-metric-aggregation"
-                value={aggregationType}
-                onChange={(e) => setAggregationType(e.target.value as MetricAggregationType)}
-                className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 focus:border-indigo-600 focus:outline-hidden focus:ring-1 focus:ring-indigo-600"
-              >
-                {Object.entries(METRIC_AGGREGATION_LABELS).map(([aggKey, aggLabel]) => (
-                  <option key={aggKey} value={aggKey}>
-                    {aggLabel}
-                  </option>
-                ))}
-              </select>
+            {/* Cột trái: Nguồn dữ liệu */}
+            <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs space-y-5">
+              <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-orange-50 text-orange-600">
+                  <Database className="h-4 w-4" />
+                </div>
+                <h3 className="text-sm font-bold text-slate-900">Nguồn dữ liệu & Cập nhật</h3>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Nguồn thu thập <span className="text-rose-500">*</span>
+                  </label>
+                  <select
+                    value={sourceType}
+                    onChange={(e) => setSourceType(e.target.value as MetricSourceType)}
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 bg-white"
+                  >
+                    {Object.entries(SOURCE_TYPE_LABELS).map(([k, v]) => (
+                      <option key={k} value={k}>{v}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="flex items-center pt-5">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={allowManualEntry}
+                      onChange={(e) => setAllowManualEntry(e.target.checked)}
+                      disabled={sourceType !== 'manual'}
+                      className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 h-4 w-4 disabled:opacity-50"
+                    />
+                    <span className={`text-sm font-medium ${sourceType !== 'manual' ? 'text-slate-400' : 'text-slate-700'}`}>
+                      Cho phép nhập thủ công
+                    </span>
+                  </label>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Cột phải: Thuộc tính tính toán */}
+          <div className="space-y-6">
+            <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs space-y-5">
+              <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-blue-50 text-blue-600">
+                  <Sliders className="h-4 w-4" />
+                </div>
+                <h3 className="text-sm font-bold text-slate-900">Thông số đo lường</h3>
+              </div>
+
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1 flex justify-between">
+                    <span>Phạm vi đo lường <span className="text-rose-500">*</span></span>
+                    {hasEntries && (
+                      <span className="text-[10px] text-amber-600 font-medium">Không thể sửa</span>
+                    )}
+                  </label>
+                  <select
+                    value={measurementScope}
+                    onChange={(e) => setMeasurementScope(e.target.value as MeasurementScope)}
+                    disabled={hasEntries}
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 bg-white disabled:bg-slate-100 disabled:text-slate-500"
+                  >
+                    {Object.entries(MEASUREMENT_SCOPE_LABELS).map(([k, v]) => (
+                      <option key={k} value={k}>{v}</option>
+                    ))}
+                  </select>
+                  {hasEntries && (
+                    <p className="text-[11px] text-amber-600 mt-1">Chỉ số đã có dữ liệu phát sinh nên không thể thay đổi phạm vi đo.</p>
+                  )}
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Loại dữ liệu <span className="text-rose-500">*</span>
+                  </label>
+                  <select
+                    value={dataType}
+                    onChange={(e) => setDataType(e.target.value as MetricDataType)}
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 bg-white"
+                  >
+                    {Object.entries(DATA_TYPE_LABELS).map(([k, v]) => (
+                      <option key={k} value={k}>{v}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Đơn vị tính (Hiển thị) <span className="text-rose-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={unit}
+                    onChange={(e) => setUnit(e.target.value)}
+                    placeholder="VD: người, giờ, %"
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Phương pháp tổng hợp <span className="text-rose-500">*</span>
+                  </label>
+                  <select
+                    value={aggregationType}
+                    onChange={(e) => setAggregationType(e.target.value as MetricAggregationType)}
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 bg-white"
+                  >
+                    {Object.entries(AGGREGATION_LABELS).map(([k, v]) => (
+                      <option key={k} value={k}>{v}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Tần suất đánh giá <span className="text-rose-500">*</span>
+                  </label>
+                  <select
+                    value={frequency}
+                    onChange={(e) => setFrequency(e.target.value as any)}
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 bg-white"
+                  >
+                    {Object.entries(FREQUENCY_LABELS).map(([k, v]) => (
+                      <option key={k} value={k}>{v}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Chiều hướng mục tiêu <span className="text-rose-500">*</span>
+                  </label>
+                  <select
+                    value={targetDirection}
+                    onChange={(e) => setTargetDirection(e.target.value as any)}
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 bg-white"
+                  >
+                    {Object.entries(TARGET_DIRECTION_LABELS).map(([k, v]) => (
+                      <option key={k} value={k}>{v}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
             </div>
 
-            {/* Tần suất thu thập (frequency) */}
-            <div>
-              <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5 flex items-center gap-1">
-                <Calendar className="h-3.5 w-3.5 text-slate-500" />
-                Tần suất đo lường (Frequency) <span className="text-red-500">*</span>
-              </label>
-              <select
-                id="select-metric-frequency"
-                value={frequency}
-                onChange={(e) => setFrequency(e.target.value as MetricFrequency)}
-                className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 focus:border-indigo-600 focus:outline-hidden focus:ring-1 focus:ring-indigo-600"
-              >
-                {Object.entries(METRIC_FREQUENCY_LABELS).map(([freqKey, freqLabel]) => (
-                  <option key={freqKey} value={freqKey}>
-                    {freqLabel}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {/* Chiều hướng mục tiêu (target_direction) */}
-            <div>
-              <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5 flex items-center gap-1">
-                <Compass className="h-3.5 w-3.5 text-slate-500" />
-                Chiều hướng mục tiêu <span className="text-red-500">*</span>
-              </label>
-              <select
-                id="select-metric-direction"
-                value={targetDirection}
-                onChange={(e) => setTargetDirection(e.target.value as MetricTargetDirection)}
-                className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 focus:border-indigo-600 focus:outline-hidden focus:ring-1 focus:ring-indigo-600"
-              >
-                {Object.entries(METRIC_TARGET_DIRECTION_LABELS).map(([dirKey, dirMeta]) => (
-                  <option key={dirKey} value={dirKey}>
-                    {dirMeta.label}
-                  </option>
-                ))}
-              </select>
+            <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs space-y-4">
+               <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Thứ tự sắp xếp (ưu tiên hiển thị)
+                  </label>
+                  <input
+                    type="number"
+                    value={sortOrder}
+                    onChange={(e) => setSortOrder(Number(e.target.value) || 0)}
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                  />
+                </div>
             </div>
           </div>
         </div>
 
-        {/* Section 3: Cấu hình vận hành & Trạng thái */}
-        <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-xs space-y-6">
-          <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
-            <Hash className="h-5 w-5 text-indigo-700" />
-            <h2 className="text-base font-bold text-slate-900">
-              3. Vận Hành & Thứ Tự Hiển Thị
-            </h2>
-          </div>
-
-          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
-            {/* allow_manual_entry */}
-            <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-4">
-              <label className="flex items-start gap-3 cursor-pointer">
-                <input
-                  id="checkbox-manual-entry"
-                  type="checkbox"
-                  checked={allowManualEntry}
-                  onChange={(e) => setAllowManualEntry(e.target.checked)}
-                  className="mt-1 h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
-                />
-                <div className="space-y-0.5">
-                  <span className="text-sm font-bold text-slate-900">
-                    Cho phép nhập liệu thủ công (allow_manual_entry)
-                  </span>
-                  <p className="text-xs text-slate-500">
-                    Bật tùy chọn này để cán bộ, nhân sự phụ trách có thể cập nhật số liệu trực tiếp qua giao diện thu thập.
-                  </p>
-                </div>
-              </label>
-            </div>
-
-            {/* is_active */}
-            <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-4">
-              <label className="flex items-start gap-3 cursor-pointer">
-                <input
-                  id="checkbox-is-active"
-                  type="checkbox"
-                  checked={isActive}
-                  onChange={(e) => setIsActive(e.target.checked)}
-                  className="mt-1 h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
-                />
-                <div className="space-y-0.5">
-                  <span className="text-sm font-bold text-slate-900">
-                    Kích hoạt áp dụng (is_active)
-                  </span>
-                  <p className="text-xs text-slate-500">
-                    Khi tắt, chỉ số sẽ tạm ẩn khỏi các biểu mẫu nhập liệu nhưng vẫn giữ nguyên toàn bộ lịch sử dữ liệu đã có.
-                  </p>
-                </div>
-              </label>
-            </div>
-
-            {/* Thứ tự sắp xếp (sort_order) */}
-            <div>
-              <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
-                Thứ tự sắp xếp hiển thị (Sort Order)
-              </label>
-              <input
-                id="input-metric-sort-order"
-                type="number"
-                value={sortOrder}
-                onChange={(e) => setSortOrder(parseInt(e.target.value, 10) || 0)}
-                className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 focus:border-indigo-600 focus:outline-hidden focus:ring-1 focus:ring-indigo-600"
-              />
-              <p className="mt-1 text-xs text-slate-500">
-                Số nhỏ hơn sẽ hiển thị trước trong danh mục và báo cáo.
-              </p>
-            </div>
-          </div>
-        </div>
-
-        {/* Submit Actions */}
-        <div className="flex items-center justify-end gap-3 border-t border-slate-200 pt-6">
+        {/* Footer actions */}
+        <div className="flex items-center justify-end gap-3 pt-6 border-t border-slate-200">
           <button
             type="button"
             onClick={onBack}
-            className="rounded-lg border border-slate-300 bg-white px-5 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 transition-colors shadow-2xs"
+            className="px-5 py-2.5 text-sm font-medium text-slate-600 bg-white border border-slate-300 rounded-xl hover:bg-slate-50 hover:text-slate-900 transition-colors"
           >
-            Hủy / Quay lại
+            Hủy bỏ
           </button>
-
           <button
             type="submit"
-            id="btn-save-metric"
             disabled={isSubmitting}
-            className="inline-flex items-center gap-2 rounded-lg bg-indigo-900 px-6 py-2.5 text-sm font-semibold text-white shadow-xs hover:bg-indigo-800 focus:ring-2 focus:ring-indigo-600 focus:outline-hidden transition-colors disabled:opacity-50"
+            className="inline-flex items-center justify-center gap-2 px-6 py-2.5 text-sm font-semibold text-white bg-indigo-600 border border-transparent rounded-xl hover:bg-indigo-700 shadow-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {isSubmitting ? (
               <>
                 <Loader2 className="h-4 w-4 animate-spin" />
-                <span>Đang lưu chỉ số...</span>
+                Đang lưu...
               </>
             ) : (
               <>
                 <Save className="h-4 w-4" />
-                <span>{mode === 'create' ? 'Tạo Chỉ Số Mới' : 'Lưu Thay Đổi'}</span>
+                Lưu cấu hình
               </>
             )}
           </button>
