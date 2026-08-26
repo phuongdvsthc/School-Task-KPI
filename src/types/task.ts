@@ -9,8 +9,8 @@
  */
 import { OrganizationUnit, Profile, SystemRole } from './database';
 
-export type TaskStatus = 'todo' | 'in_progress' | 'review' | 'completed' | 'cancelled';
-export type TaskPriority = 'low' | 'medium' | 'high' | 'urgent';
+export type TaskStatus = 'todo' | 'in_progress' | 'waiting' | 'completed' | 'cancelled';
+export type TaskPriority = 'low' | 'normal' | 'high' | 'urgent';
 export type TaskType = 'regular' | 'strategic' | 'urgent' | 'teaching' | 'administrative' | 'event' | 'other';
 export type AssignmentRole = 'responsible' | 'participant' | 'reviewer' | 'supporter';
 export type EvidenceType = 'link' | 'document' | 'image' | 'report' | 'other';
@@ -30,6 +30,8 @@ export interface Task {
   priority: TaskPriority;
   status: TaskStatus;
   progress: number;
+  old_progress?: number;
+  new_progress?: number;
   start_date: string | null;
   due_date: string | null;
   completed_at: string | null;

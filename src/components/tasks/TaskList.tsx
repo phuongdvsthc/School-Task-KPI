@@ -123,7 +123,7 @@ export const TaskList: React.FC = () => {
   // KPI summary metrics
   const totalTasks = tasks.length;
   const inProgressCount = tasks.filter((t) => t.status === 'in_progress').length;
-  const reviewCount = tasks.filter((t) => t.status === 'review').length;
+  const reviewCount = tasks.filter((t) => t.status === 'waiting').length;
   const completedCount = tasks.filter((t) => t.status === 'completed').length;
   const overdueCount = tasks.filter(
     (t) => t.due_date && t.status !== 'completed' && new Date(t.due_date).getTime() < new Date().setHours(0, 0, 0, 0)
@@ -318,7 +318,7 @@ export const TaskList: React.FC = () => {
               <option value="all">Tất cả trạng thái</option>
               <option value="todo">Chưa thực hiện</option>
               <option value="in_progress">Đang thực hiện</option>
-              <option value="review">Chờ duyệt / Nghiệm thu</option>
+              <option value="review">Đang chờ</option>
               <option value="completed">Hoàn thành</option>
               <option value="cancelled">Đã hủy</option>
             </select>
@@ -334,9 +334,9 @@ export const TaskList: React.FC = () => {
               className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs text-slate-900 focus:border-blue-500 focus:outline-none"
             >
               <option value="all">Tất cả mức độ</option>
-              <option value="urgent">Khẩn cấp</option>
+              <option value="urgent">Khẩn</option>
               <option value="high">Cao</option>
-              <option value="medium">Trung bình</option>
+              <option value="normal">Bình thường</option>
               <option value="low">Thấp</option>
             </select>
           </div>
@@ -400,7 +400,11 @@ export const TaskList: React.FC = () => {
                   return (
                     <tr
                       key={t.id}
-                      className="hover:bg-slate-50/70 transition-colors group"
+                      className="hover:bg-slate-50/70 transition-colors group cursor-pointer"
+                      onClick={() => {
+                        setSelectedTaskId(t.id);
+                        setSubView('detail');
+                      }}
                     >
                       {/* Task Code & Title */}
                       <td className="px-5 py-4 min-w-[280px]">
@@ -482,9 +486,31 @@ export const TaskList: React.FC = () => {
                         </div>
                       </td>
 
-                      {/* Actions - Disabled for now as requested */}
-                      <td className="px-4 py-4 text-right min-w-[130px]">
-                        <span className="text-[10px] text-slate-400">Chưa mở</span>
+                      {/* Actions */}
+                      <td className="px-4 py-4 text-right min-w-[130px]" onClick={(e) => e.stopPropagation()}>
+                        <div className="flex items-center justify-end gap-1.5">
+                          {systemRole !== 'executive' && systemRole !== 'viewer' && (
+                            <button
+                              type="button"
+                              onClick={(e) => { e.stopPropagation(); setTaskForProgressUpdate(t); }}
+                              className="p-1.5 rounded-lg text-blue-600 hover:bg-blue-50 transition-colors"
+                              title="Cập nhật tiến độ"
+                            >
+                              <TrendingUp className="h-4 w-4" />
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedTaskId(t.id);
+                              setSubView('detail');
+                            }}
+                            className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+                            title="Xem chi tiết"
+                          >
+                            <ChevronRight className="h-4 w-4" />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );

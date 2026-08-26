@@ -38,7 +38,7 @@ export const TaskCreate: React.FC<TaskCreateProps> = ({ onBack, onTaskCreated })
   const [ownerId, setOwnerId] = useState<string>('');
   const [participantIds, setParticipantIds] = useState<string[]>([]);
   const [taskType, setTaskType] = useState<TaskType>('regular');
-  const [priority, setPriority] = useState<TaskPriority>('medium');
+  const [priority, setPriority] = useState<TaskPriority>('normal');
   const [startDate, setStartDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [dueDate, setDueDate] = useState<string>('');
   const [description, setDescription] = useState<string>('');
@@ -378,9 +378,9 @@ export const TaskCreate: React.FC<TaskCreateProps> = ({ onBack, onTaskCreated })
                 className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 focus:border-blue-500 focus:outline-none"
               >
                 <option value="low">Thấp</option>
-                <option value="medium">Trung bình</option>
+                <option value="normal">Bình thường</option>
                 <option value="high">Cao</option>
-                <option value="urgent">Khẩn cấp</option>
+                <option value="urgent">Khẩn</option>
               </select>
             </div>
 

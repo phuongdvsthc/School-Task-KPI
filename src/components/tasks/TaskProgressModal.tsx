@@ -124,7 +124,7 @@ export const TaskProgressModal: React.FC<TaskProgressModalProps> = ({
           <div>
             <h4 className="text-sm font-medium text-slate-800 line-clamp-1 mb-1">{task.title}</h4>
             <p className="text-xs text-slate-500">
-              Tiến độ hiện tại: <span className="font-semibold text-slate-700">{task.progress}%</span> ({task.status})
+              Tiến độ hiện tại: <span className="font-semibold text-slate-700">{task.status === 'completed' ? 100 : task.progress}%</span> ({task.status})
             </p>
           </div>
 
@@ -187,7 +187,7 @@ export const TaskProgressModal: React.FC<TaskProgressModalProps> = ({
               {[
                 { val: 'todo', label: 'Chưa thực hiện', color: 'border-slate-300 text-slate-700' },
                 { val: 'in_progress', label: 'Đang thực hiện', color: 'border-blue-400 text-blue-700 bg-blue-50/50' },
-                { val: 'review', label: 'Chờ duyệt / Nghiệm thu', color: 'border-purple-400 text-purple-700 bg-purple-50/50' },
+                { val: 'waiting', label: 'Đang chờ', color: 'border-purple-400 text-purple-700 bg-purple-50/50' },
                 { val: 'completed', label: 'Hoàn thành', color: 'border-emerald-400 text-emerald-700 bg-emerald-50/50' },
                 { val: 'cancelled', label: 'Đã hủy / Tạm dừng', color: 'border-rose-300 text-rose-700 bg-rose-50/50' },
               ].map((item) => (

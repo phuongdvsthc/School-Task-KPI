@@ -193,7 +193,7 @@ export const taskService = {
         (supabase.from('organization_units') as any).select('*').eq('id', task.organization_unit_id).maybeSingle(),
         (supabase.from('profiles') as any).select('*').eq('id', task.owner_id).maybeSingle(),
         (supabase.from('profiles') as any).select('*').eq('id', task.created_by).maybeSingle(),
-        (supabase.from('task_assignees') as any).select('*').eq('task_id', taskId),
+        (supabase.from('task_assignees') as any).select('*, profile:profiles(*)').eq('task_id', taskId),
         (supabase.from('task_updates') as any).select('*').eq('task_id', taskId).order('created_at', { ascending: false }),
         (supabase.from('task_evidence') as any).select('*').eq('task_id', taskId).order('created_at', { ascending: false }),
         (supabase.from('task_comments') as any).select('*').eq('task_id', taskId).order('created_at', { ascending: true }),
@@ -386,55 +386,53 @@ export const taskService = {
    * 2. Tạo một record mới trong task_updates.
    * 3. Tuyệt đối không ghi đè lịch sử task_updates.
    */
+  /**
+   * Lấy lịch sử cập nhật của task
+   */
+  async getTaskUpdates(taskId: string): Promise<TaskUpdate[]> {
+    const supabase = getSupabaseClient();
+    if (!supabase) return [];
+
+    try {
+      const { data, error } = await supabase
+        .from('task_updates')
+        .select(`
+          *,
+          user_profile:profiles ( id, full_name, job_title, employee_code, system_role )
+        `)
+        .eq('task_id', taskId)
+        .order('created_at', { ascending: false });
+
+      if (error) {
+        console.warn('[Task Service] Error fetching updates:', error.message);
+        return [];
+      }
+      return (data || []) as TaskUpdate[];
+    } catch (err) {
+      console.warn('[Task Service] Exception fetching updates:', err);
+      return [];
+    }
+  },
+
   async updateTaskProgress(payload: UpdateProgressPayload): Promise<{ success: boolean; error?: string }> {
     const supabase = getSupabaseClient();
     if (!supabase) {
       return { success: false, error: 'Supabase chưa sẵn sàng' };
     }
 
-    const timestamp = new Date().toISOString();
     const normalizedProgress = Math.max(0, Math.min(100, Math.round(payload.progress)));
-    const isCompleted = payload.newStatus === 'completed' || normalizedProgress === 100;
-    const finalStatus: TaskStatus = isCompleted ? 'completed' : payload.newStatus;
-    const completedAt = isCompleted ? timestamp : null;
+    const finalStatus = (normalizedProgress === 100 || payload.newStatus === 'completed') ? 'completed' : payload.newStatus;
 
     try {
-      // Query current task first to get old_status
-      let oldStatus: TaskStatus | null = null;
-      const { data: cur } = await (supabase.from('tasks') as any)
-        .select('status')
-        .eq('id', payload.taskId)
-        .maybeSingle();
-      if (cur) oldStatus = cur.status;
+      const { error } = await (supabase as any).rpc('update_task_progress', {
+        p_task_id: payload.taskId,
+        p_progress: normalizedProgress,
+        p_status: finalStatus,
+        p_content: payload.content.trim() || `Cập nhật tiến độ ${normalizedProgress}%`
+      });
 
-      // 1. Cập nhật bảng tasks
-      const { error: taskErr } = await (supabase.from('tasks') as any)
-        .update({
-          progress: normalizedProgress,
-          status: finalStatus,
-          completed_at: completedAt,
-          updated_at: timestamp,
-        })
-        .eq('id', payload.taskId);
-
-      if (taskErr) {
-        return { success: false, error: taskErr.message };
-      }
-
-      // 2. Tạo record mới trong task_updates (Không ghi đè)
-      const { error: updateErr } = await (supabase.from('task_updates') as any)
-        .insert({
-          task_id: payload.taskId,
-          user_id: payload.userId,
-          update_type: 'progress_update',
-          progress: normalizedProgress,
-          old_status: oldStatus,
-          new_status: finalStatus,
-          content: payload.content.trim() || `Cập nhật tiến độ ${normalizedProgress}% - Trạng thái: ${finalStatus}`,
-        });
-
-      if (updateErr) {
-        console.warn('[Task Service] Error adding task_update in Supabase:', updateErr.message);
+      if (error) {
+        return { success: false, error: error.message };
       }
 
       return { success: true };

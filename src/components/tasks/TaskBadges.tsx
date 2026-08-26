@@ -24,14 +24,14 @@ export const TaskStatusBadge: React.FC<{ status: TaskStatus; className?: string 
           Đang thực hiện
         </span>
       );
-    case 'review':
+    case 'waiting':
       return (
         <span
           id={`status-badge-${status}`}
           className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-purple-100 text-purple-800 border border-purple-200 ${className}`}
         >
           <AlertCircle className="w-3.5 h-3.5" />
-          Chờ duyệt / Nghiệm thu
+          Đang chờ
         </span>
       );
     case 'cancelled':
@@ -67,7 +67,7 @@ export const TaskPriorityBadge: React.FC<{ priority: TaskPriority; className?: s
           className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-800 border border-red-200 ${className}`}
         >
           <ShieldAlert className="w-3 h-3 text-red-600" />
-          Khẩn cấp
+          Khẩn
         </span>
       );
     case 'high':
@@ -79,13 +79,13 @@ export const TaskPriorityBadge: React.FC<{ priority: TaskPriority; className?: s
           Cao
         </span>
       );
-    case 'medium':
+    case 'normal':
       return (
         <span
           id={`priority-badge-${priority}`}
           className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-700 border border-slate-200 ${className}`}
         >
-          Trung bình
+          Bình thường
         </span>
       );
     case 'low':

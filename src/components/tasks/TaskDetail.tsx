@@ -32,6 +32,13 @@ interface TaskDetailProps {
   onBack: () => void;
 }
 
+const statusMap: Record<string, string> = {
+  todo: 'Chưa thực hiện',
+  in_progress: 'Đang thực hiện',
+  waiting: 'Đang chờ',
+  completed: 'Hoàn thành',
+  cancelled: 'Đã hủy'
+};
 export const TaskDetail: React.FC<TaskDetailProps> = ({ taskId, onBack }) => {
   const { user, profile, systemRole, allUnits } = useAuth();
 
@@ -45,6 +52,7 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ taskId, onBack }) => {
 
   // Comment input state
   const [newComment, setNewComment] = useState<string>('');
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [isSendingComment, setIsSendingComment] = useState<boolean>(false);
 
   const fetchTaskDetails = async () => {
@@ -124,6 +132,19 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ taskId, onBack }) => {
 
   return (
     <div id="task-detail-container" className="space-y-6 max-w-6xl mx-auto">
+            {successMessage && (
+        <div className="flex items-center gap-2.5 rounded-xl bg-emerald-50 border border-emerald-200 p-4 text-sm font-medium text-emerald-800 shadow-sm animate-in fade-in slide-in-from-top-4 relative">
+          <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-600" />
+          <span>{successMessage}</span>
+          <button 
+            onClick={() => setSuccessMessage(null)}
+            className="absolute top-1/2 -translate-y-1/2 right-4 text-emerald-500 hover:text-emerald-700"
+          >
+            ×
+          </button>
+        </div>
+      )}
+
       {/* Top Bar Navigation */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <button
@@ -197,19 +218,19 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ taskId, onBack }) => {
               <TrendingUp className="h-4 w-4 text-blue-600" />
               Tiến độ thực hiện hiện tại
             </span>
-            <span className="text-sm font-bold text-blue-700">{taskDetails.progress}%</span>
+            <span className="text-sm font-bold text-blue-700">{taskDetails.status === "completed" ? 100 : taskDetails.progress}%</span>
           </div>
 
           <div className="h-3 w-full bg-slate-200 rounded-full overflow-hidden">
             <div
               className={`h-full transition-all duration-500 ${
-                taskDetails.progress === 100
+                taskDetails.status === "completed" || taskDetails.progress === 100
                   ? 'bg-emerald-500'
                   : taskDetails.progress > 50
                   ? 'bg-blue-600'
                   : 'bg-amber-500'
               }`}
-              style={{ width: `${taskDetails.progress}%` }}
+              style={{ width: `${taskDetails.status === "completed" ? 100 : taskDetails.progress}%` }}
             />
           </div>
 
@@ -329,22 +350,32 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ taskId, onBack }) => {
                         </div>
 
                         {/* Progress changes */}
-                        <div className="flex items-center gap-3 text-xs">
-                          <span className="font-semibold text-blue-700 bg-blue-100/70 px-2 py-0.5 rounded">
-                            Tiến độ: {upd.progress}%
-                          </span>
-                          {upd.new_status && (
-                            <span className="text-slate-500 text-[11px]">
-                              Trạng thái: <strong>{upd.new_status}</strong>
-                            </span>
+                        <div className="flex flex-col gap-1 text-xs pt-1">
+                          {upd.old_status === null && upd.update_type === 'general' ? null : (
+                            <>
+                              {upd.new_progress !== undefined && upd.old_progress !== undefined && upd.new_progress !== upd.old_progress && (
+                                <span className="font-semibold text-slate-700">
+                                  Tiến độ: {upd.old_progress}% → {upd.new_progress}%
+                                </span>
+                              )}
+                              {upd.new_progress === undefined && upd.progress !== undefined && upd.progress !== upd.old_progress && (
+                                <span className="font-semibold text-slate-700">
+                                  Tiến độ: {upd.old_progress ?? 0}% → {upd.progress}%
+                                </span>
+                              )}
+                              {upd.new_status && upd.new_status !== upd.old_status && (
+                                <span className="font-semibold text-slate-700">
+                                  Trạng thái: <span className="uppercase text-[10px]">{statusMap[upd.old_status as string] || upd.old_status || 'Mới'}</span> → <span className="uppercase text-[10px]">{statusMap[upd.new_status as string] || upd.new_status}</span>
+                                </span>
+                              )}
+                            </>
+                          )}
+                          {upd.content && (
+                            <p className="text-slate-600 leading-relaxed whitespace-pre-wrap mt-1">
+                              {upd.content}
+                            </p>
                           )}
                         </div>
-
-                        {upd.content && (
-                          <p className="text-xs text-slate-700 leading-relaxed whitespace-pre-wrap pt-1">
-                            {upd.content}
-                          </p>
-                        )}
                       </div>
                     </div>
                   ))}
@@ -614,7 +645,7 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ taskId, onBack }) => {
           task={taskDetails}
           isOpen={isProgressModalOpen}
           onClose={() => setIsProgressModalOpen(false)}
-          onSuccess={fetchTaskDetails}
+          onSuccess={() => { fetchTaskDetails(); setSuccessMessage('Cập nhật tiến độ thành công.'); }}
         />
       )}
 
