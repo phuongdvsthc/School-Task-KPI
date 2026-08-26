@@ -84,6 +84,10 @@ export interface TaskEvidence {
   title: string;
   description: string | null;
   file_url: string | null;
+  storage_path: string | null;
+  original_file_name: string | null;
+  mime_type: string | null;
+  file_size: number | null;
   external_url: string | null;
   created_at: string;
   // Join fields
@@ -259,4 +263,18 @@ export function checkTaskPermissions(
     canUpdateProgress: false,
     canDelete: false,
   };
+}
+
+/**
+ * Timeline Item
+ */
+export interface TimelineItem {
+  id: string;
+  type: 'progress' | 'status' | 'evidence' | 'comment';
+  user_id: string;
+  user_name: string;
+  user_role: string;
+  created_at: string;
+  content: string | null;
+  metadata?: any;
 }

@@ -550,4 +550,250 @@ export const taskService = {
       return { success: false, error: msg };
     }
   },
+
+  /**
+   * getTaskEvidence
+   */
+  async getTaskEvidence(taskId: string) {
+    const supabase = getSupabaseClient();
+    if (!supabase) return [];
+    const { data, error } = await supabase
+      .from('task_evidence')
+      .select('*, uploader_profile:profiles(id, full_name, job_title, employee_code, system_role)')
+      .eq('task_id', taskId)
+      .order('created_at', { ascending: false });
+    if (error) console.error(error);
+    return data || [];
+  },
+
+  /**
+   * addTaskExternalLink
+   */
+  async addTaskExternalLink(payload: any): Promise<{ success: boolean; error?: string }> {
+    const supabase = getSupabaseClient();
+    if (!supabase) return { success: false, error: 'Supabase chua san sang' };
+
+    try {
+      const { error } = await supabase.from('task_evidence').insert({
+        task_id: payload.taskId,
+        uploaded_by: payload.uploadedBy,
+        evidence_type: 'link',
+        title: payload.title,
+        description: payload.description || null,
+        external_url: payload.externalUrl,
+      });
+
+      if (error) return { success: false, error: error.message };
+
+      // insert timeline update? We can also insert to task_updates for evidence added if needed,
+      // but user said timeline merges updates, evidence and comments. So we don't need to double write.
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  },
+
+  /**
+   * uploadTaskEvidence
+   */
+  async uploadTaskEvidence(file: File, payload: any): Promise<{ success: boolean; error?: string }> {
+    const supabase = getSupabaseClient();
+    if (!supabase) return { success: false, error: 'Supabase chua san sang' };
+
+    try {
+      // file size check
+      if (file.size > 10 * 1024 * 1024) {
+        return { success: false, error: 'Dung lượng file tối đa là 10 MB.' };
+      }
+      
+      const uuid = crypto.randomUUID();
+      const safeFileName = file.name.replace(/[^a-zA-Z0-9.-]/g, '_');
+      const storagePath = `${payload.taskId}/${payload.uploadedBy}/${uuid}-${safeFileName}`;
+      
+      // Upload to storage
+      const { data: uploadData, error: uploadError } = await supabase.storage
+        .from('task-evidence')
+        .upload(storagePath, file);
+        
+      if (uploadError) return { success: false, error: uploadError.message };
+      
+      // Insert to DB
+      const { error: dbError } = await supabase.from('task_evidence').insert({
+        task_id: payload.taskId,
+        uploaded_by: payload.uploadedBy,
+        evidence_type: payload.evidenceType || 'document',
+        title: payload.title,
+        description: payload.description || null,
+        storage_path: storagePath,
+        original_file_name: file.name,
+        mime_type: file.type,
+        file_size: file.size,
+      });
+      
+      if (dbError) {
+        // Rollback upload
+        await supabase.storage.from('task-evidence').remove([storagePath]);
+        return { success: false, error: dbError.message };
+      }
+      
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  },
+  
+  /**
+   * getEvidenceSignedUrl
+   */
+  async getEvidenceSignedUrl(storagePath: string): Promise<{ url: string | null; error?: string }> {
+    const supabase = getSupabaseClient();
+    if (!supabase) return { url: null, error: 'Supabase chua san sang' };
+    
+    const { data, error } = await supabase.storage
+      .from('task-evidence')
+      .createSignedUrl(storagePath, 5 * 60); // 5 mins
+      
+    if (error) return { url: null, error: error.message };
+    return { url: data.signedUrl };
+  },
+  
+  /**
+   * deleteTaskEvidence
+   */
+  async deleteTaskEvidence(evidenceId: string, storagePath?: string | null): Promise<{ success: boolean; error?: string }> {
+    const supabase = getSupabaseClient();
+    if (!supabase) return { success: false, error: 'Supabase chua san sang' };
+    
+    try {
+      if (storagePath) {
+        await supabase.storage.from('task-evidence').remove([storagePath]);
+      }
+      const { error } = await supabase.from('task_evidence').delete().eq('id', evidenceId);
+      if (error) return { success: false, error: error.message };
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  },
+
+  /**
+   * getTaskComments
+   */
+  async getTaskComments(taskId: string) {
+    const supabase = getSupabaseClient();
+    if (!supabase) return [];
+    const { data, error } = await supabase
+      .from('task_comments')
+      .select('*, user_profile:profiles(id, full_name, job_title, employee_code, system_role)')
+      .eq('task_id', taskId)
+      .order('created_at', { ascending: false });
+    if (error) console.error(error);
+    return data || [];
+  },
+
+
+  /**
+   * updateTaskComment
+   */
+  async updateTaskComment(commentId: string, content: string): Promise<{ success: boolean; error?: string }> {
+    const supabase = getSupabaseClient();
+    if (!supabase) return { success: false, error: 'Supabase chua san sang' };
+
+    try {
+      if (!content || !content.trim()) return { success: false, error: 'Nội dung rỗng' };
+      const { error } = await supabase.from('task_comments').update({ content: content.trim(), updated_at: new Date().toISOString() }).eq('id', commentId);
+      if (error) return { success: false, error: error.message };
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  },
+
+  /**
+   * deleteTaskComment
+   */
+  async deleteTaskComment(commentId: string): Promise<{ success: boolean; error?: string }> {
+    const supabase = getSupabaseClient();
+    if (!supabase) return { success: false, error: 'Supabase chua san sang' };
+
+    try {
+      const { error } = await supabase.from('task_comments').delete().eq('id', commentId);
+      if (error) return { success: false, error: error.message };
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  },
+
+  /**
+   * getTaskTimeline
+   */
+  async getTaskTimeline(taskId: string): Promise<any[]> {
+    const [updates, evidence, comments] = await Promise.all([
+      this.getTaskUpdates(taskId),
+      this.getTaskEvidence(taskId),
+      this.getTaskComments(taskId)
+    ]);
+
+    const timeline: any[] = [];
+
+    // Map Updates
+    updates.forEach((u: any) => {
+      timeline.push({
+        id: `upd-${u.id}`,
+        type: u.update_type === 'progress_update' ? 'progress' : 'status', // or just progress
+        user_id: u.user_id,
+        user_name: u.user_profile?.full_name || 'Người dùng',
+        user_role: u.user_profile?.job_title || u.user_profile?.system_role || '',
+        created_at: u.created_at,
+        content: u.content,
+        metadata: {
+          old_progress: u.old_progress,
+          new_progress: u.new_progress ?? u.progress,
+          old_status: u.old_status,
+          new_status: u.new_status
+        }
+      });
+    });
+
+    // Map Evidence
+    evidence.forEach((e: any) => {
+      timeline.push({
+        id: `evd-${e.id}`,
+        type: 'evidence',
+        user_id: e.uploaded_by,
+        user_name: e.uploader_profile?.full_name || 'Người dùng',
+        user_role: e.uploader_profile?.job_title || e.uploader_profile?.system_role || '',
+        created_at: e.created_at,
+        content: e.evidence_type === 'link' 
+          ? `Đã thêm liên kết: ${e.title}` 
+          : `Đã thêm minh chứng: ${e.original_file_name || e.title}`,
+        metadata: {
+          evidence_type: e.evidence_type,
+          external_url: e.external_url,
+          storage_path: e.storage_path
+        }
+      });
+    });
+
+    // Map Comments
+    comments.forEach((c: any) => {
+      timeline.push({
+        id: `cmt-${c.id}`,
+        type: 'comment',
+        user_id: c.user_id,
+        user_name: c.user_profile?.full_name || 'Người dùng',
+        user_role: c.user_profile?.job_title || c.user_profile?.system_role || '',
+        created_at: c.created_at,
+        content: c.content,
+        metadata: {}
+      });
+    });
+
+    // Sort DESC
+    timeline.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+    return timeline;
+  }
+
 };

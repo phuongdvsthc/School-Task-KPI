@@ -43,9 +43,8 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ taskId, onBack }) => {
   const { user, profile, systemRole, allUnits } = useAuth();
 
   const [taskDetails, setTaskDetails] = useState<FullTaskDetails | null>(null);
-  const [timeline, setTimeline] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
-  const [activeSubTab, setActiveSubTab] = useState<'timeline' | 'evidence' | 'comments'>('timeline');
+  const [activeSubTab, setActiveSubTab] = useState<'updates' | 'evidence' | 'comments'>('updates');
 
   // Modals state
   const [isProgressModalOpen, setIsProgressModalOpen] = useState<boolean>(false);
@@ -61,10 +60,6 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ taskId, onBack }) => {
     try {
       const data = await taskService.getTaskById(taskId);
       setTaskDetails(data);
-      if (data) {
-        const tl = await taskService.getTaskTimeline(taskId);
-        setTimeline(tl);
-      }
     } catch (err) {
       console.error('Error fetching task details:', err);
     } finally {
@@ -112,22 +107,6 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ taskId, onBack }) => {
     taskDetails.due_date &&
     taskDetails.status !== 'completed' &&
     new Date(taskDetails.due_date).getTime() < new Date().setHours(0, 0, 0, 0);
-
-  
-  const handleViewEvidence = async (evi: any) => {
-    if (evi.evidence_type === 'link' && evi.external_url) {
-      window.open(evi.external_url, '_blank');
-      return;
-    }
-    if (evi.storage_path) {
-      const res = await taskService.getEvidenceSignedUrl(evi.storage_path);
-      if (res.url) {
-        window.open(res.url, '_blank');
-      } else {
-        alert(res.error || 'Không thể mở file');
-      }
-    }
-  };
 
   const handleSendComment = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -273,15 +252,15 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ taskId, onBack }) => {
               type="button"
               onClick={() => setActiveSubTab('updates')}
               className={`flex items-center gap-2 px-4 py-3 text-xs font-bold border-b-2 transition-colors ${
-                activeSubTab === 'timeline'
+                activeSubTab === 'updates'
                   ? 'border-blue-600 text-blue-600'
                   : 'border-transparent text-slate-500 hover:text-slate-700'
               }`}
             >
               <History className="h-4 w-4" />
-              <span>Lịch sử hoạt động</span>
+              <span>Tiến độ & Nhật ký</span>
               <span className="ml-1 px-1.5 py-0.2 rounded-full text-[10px] bg-slate-100 text-slate-600 font-semibold">
-                {timeline?.length || 0}
+                {taskDetails.updates?.length || 0}
               </span>
             </button>
 
@@ -321,32 +300,37 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ taskId, onBack }) => {
           </div>
 
           {/* Sub-tab 1: Lịch sử cập nhật tiến độ (task_updates) */}
-          
-          {activeSubTab === 'timeline' && (
-            <div id="timeline-section" className="bg-white rounded-b-2xl border border-slate-200 border-t-0 p-6 space-y-6">
+          {activeSubTab === 'updates' && (
+            <div id="updates-section" className="bg-white rounded-b-2xl border border-slate-200 border-t-0 p-6 space-y-6">
               <div className="flex items-center justify-between">
                 <div>
-                  <h3 className="text-sm font-bold text-slate-900">Lịch sử hoạt động</h3>
+                  <h3 className="text-sm font-bold text-slate-900">Lịch sử tiến trình & Báo cáo</h3>
                   <p className="text-xs text-slate-500">
-                    Toàn bộ lịch sử cập nhật, minh chứng, trao đổi
+                    Toàn bộ lịch sử các lần cập nhật tiến độ (không bị ghi đè)
                   </p>
                 </div>
+                {perms.canUpdateProgress && (
+                  <button
+                    type="button"
+                    onClick={() => setIsProgressModalOpen(true)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    Cập nhật mới
+                  </button>
+                )}
               </div>
 
-              {(!timeline || timeline.length === 0) ? (
+              {(!taskDetails.updates || taskDetails.updates.length === 0) ? (
                 <div className="text-center py-8 text-slate-400 text-xs">
-                  Chưa có hoạt động nào được ghi nhận.
+                  Chưa có lần cập nhật tiến độ nào được ghi nhận.
                 </div>
               ) : (
                 <div className="relative pl-6 space-y-6 before:absolute before:left-2 before:top-2 before:bottom-2 before:w-0.5 before:bg-slate-200">
-                  {timeline.map((item, idx) => (
-                    <div key={item.id} className="relative group">
+                  {taskDetails.updates.map((upd, idx) => (
+                    <div key={upd.id} className="relative group">
                       {/* Timeline dot */}
-                      <div className={`absolute -left-6 top-1.5 flex h-4 w-4 items-center justify-center rounded-full text-white ring-4 ring-white ${
-                        item.type === 'progress' || item.type === 'status' ? 'bg-blue-600' :
-                        item.type === 'evidence' ? 'bg-emerald-500' :
-                        'bg-purple-500'
-                      }`}>
+                      <div className="absolute -left-6 top-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-blue-600 text-white ring-4 ring-white">
                         <div className="h-1.5 w-1.5 rounded-full bg-white" />
                       </div>
 
@@ -354,39 +338,41 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ taskId, onBack }) => {
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <div className="flex items-center gap-2">
                             <span className="text-xs font-bold text-slate-900">
-                              {item.user_name}
+                              {upd.user_profile?.full_name || 'Cán bộ thực hiện'}
                             </span>
                             <span className="text-[11px] text-slate-500">
-                              ({item.user_role})
+                              ({upd.user_profile?.job_title || 'Cán bộ'})
                             </span>
                           </div>
                           <span className="text-[11px] text-slate-400">
-                            {new Date(item.created_at).toLocaleString('vi-VN')}
+                            {new Date(upd.created_at).toLocaleString('vi-VN')}
                           </span>
                         </div>
 
+                        {/* Progress changes */}
                         <div className="flex flex-col gap-1 text-xs pt-1">
-                          {item.type === 'progress' || item.type === 'status' ? (
+                          {upd.old_status === null && upd.update_type === 'general' ? null : (
                             <>
-                              {item.metadata?.new_progress !== undefined && item.metadata?.old_progress !== undefined && item.metadata?.new_progress !== item.metadata?.old_progress && (
+                              {upd.new_progress !== undefined && upd.old_progress !== undefined && upd.new_progress !== upd.old_progress && (
                                 <span className="font-semibold text-slate-700">
-                                  Tiến độ: {item.metadata.old_progress}% → {item.metadata.new_progress}%
+                                  Tiến độ: {upd.old_progress}% → {upd.new_progress}%
                                 </span>
                               )}
-                              {item.metadata?.new_status && item.metadata?.new_status !== item.metadata?.old_status && (
+                              {upd.new_progress === undefined && upd.progress !== undefined && upd.progress !== upd.old_progress && (
                                 <span className="font-semibold text-slate-700">
-                                  Trạng thái: <span className="uppercase text-[10px]">{statusMap[item.metadata.old_status as string] || item.metadata.old_status || 'Mới'}</span> → <span className="uppercase text-[10px]">{statusMap[item.metadata.new_status as string] || item.metadata.new_status}</span>
+                                  Tiến độ: {upd.old_progress ?? 0}% → {upd.progress}%
                                 </span>
                               )}
-                              {item.content && (
-                                <p className="text-slate-600 leading-relaxed whitespace-pre-wrap mt-1">
-                                  {item.content}
-                                </p>
+                              {upd.new_status && upd.new_status !== upd.old_status && (
+                                <span className="font-semibold text-slate-700">
+                                  Trạng thái: <span className="uppercase text-[10px]">{statusMap[upd.old_status as string] || upd.old_status || 'Mới'}</span> → <span className="uppercase text-[10px]">{statusMap[upd.new_status as string] || upd.new_status}</span>
+                                </span>
                               )}
                             </>
-                          ) : (
-                            <p className="text-slate-600 leading-relaxed whitespace-pre-wrap">
-                              {item.content}
+                          )}
+                          {upd.content && (
+                            <p className="text-slate-600 leading-relaxed whitespace-pre-wrap mt-1">
+                              {upd.content}
                             </p>
                           )}
                         </div>
@@ -397,6 +383,7 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ taskId, onBack }) => {
               )}
             </div>
           )}
+
           {/* Sub-tab 2: Minh chứng hoàn thành (task_evidence) */}
           {activeSubTab === 'evidence' && (
             <div id="evidence-section" className="bg-white rounded-b-2xl border border-slate-200 border-t-0 p-6 space-y-5">
@@ -451,37 +438,17 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ taskId, onBack }) => {
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-2">
-                        {(evi.external_url || evi.storage_path) && (
-                          <button
-                            type="button"
-                            onClick={() => handleViewEvidence(evi)}
-                            className="inline-flex shrink-0 items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors"
-                          >
-                            <ExternalLink className="h-3.5 w-3.5" />
-                            <span>Mở xem</span>
-                          </button>
-                        )}
-                        {(user?.id === evi.uploaded_by || systemRole === 'admin') && (
-                          <button
-                            type="button"
-                            onClick={async () => {
-                              if(confirm('Bạn có chắc chắn muốn xóa minh chứng này?')) {
-                                const res = await taskService.deleteTaskEvidence(evi.id, evi.storage_path);
-                                if(res.success) {
-                                  setSuccessMessage('Xóa minh chứng thành công.');
-                                  fetchTaskDetails();
-                                } else {
-                                  alert(res.error || 'Lỗi khi xóa minh chứng');
-                                }
-                              }
-                            }}
-                            className="inline-flex shrink-0 items-center gap-1.5 px-2 py-1.5 text-xs font-semibold text-rose-600 bg-rose-50 hover:bg-rose-100 rounded-lg transition-colors"
-                          >
-                            Xóa
-                          </button>
-                        )}
-                      </div>
+                      {(evi.external_url || evi.file_url) && (
+                        <a
+                          href={evi.external_url || evi.file_url || '#'}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex shrink-0 items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors"
+                        >
+                          <ExternalLink className="h-3.5 w-3.5" />
+                          <span>Mở xem</span>
+                        </a>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -521,30 +488,9 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ taskId, onBack }) => {
                               ({cmt.user_profile?.job_title || cmt.user_profile?.system_role || 'Thành viên'})
                             </span>
                           </div>
-                          <div className="flex items-center gap-2">
-                            <span className="text-[10px] text-slate-400">
-                              {new Date(cmt.created_at).toLocaleString('vi-VN')}
-                            </span>
-                            {(user?.id === cmt.user_id || systemRole === 'admin') && (
-                              <button
-                                type="button"
-                                onClick={async () => {
-                                  if(confirm('Bạn có chắc chắn muốn xóa bình luận này?')) {
-                                    const res = await taskService.deleteTaskComment(cmt.id);
-                                    if(res.success) {
-                                      setSuccessMessage('Xóa bình luận thành công.');
-                                      fetchTaskDetails();
-                                    } else {
-                                      alert(res.error || 'Lỗi khi xóa bình luận');
-                                    }
-                                  }
-                                }}
-                                className="text-[10px] text-rose-500 hover:text-rose-700 font-medium"
-                              >
-                                Xóa
-                              </button>
-                            )}
-                          </div>
+                          <span className="text-[10px] text-slate-400">
+                            {new Date(cmt.created_at).toLocaleString('vi-VN')}
+                          </span>
                         </div>
                         <p className="text-xs text-slate-700 leading-relaxed whitespace-pre-wrap">
                           {cmt.content}
@@ -556,8 +502,7 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ taskId, onBack }) => {
               </div>
 
               {/* New comment input form */}
-              {perms.canUpdateProgress && (
-                <form onSubmit={handleSendComment} className="pt-3 border-t border-slate-100 flex gap-2">
+              <form onSubmit={handleSendComment} className="pt-3 border-t border-slate-100 flex gap-2">
                 <input
                   id="task-comment-input"
                   type="text"
@@ -582,7 +527,6 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ taskId, onBack }) => {
                   )}
                 </button>
               </form>
-              )}
             </div>
           )}
         </div>
