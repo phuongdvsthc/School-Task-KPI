@@ -1,6 +1,7 @@
 /**
  * Master Application Layout
  * Quản lý Sidebar, Header, chuyển đổi Tab nội dung, Modal cấu hình và Route synchronization
+ * Quản lý trạng thái responsive và collapse của thanh điều hướng (Sidebar)
  */
 import React, { useState, useEffect } from 'react';
 import { Sidebar, NavTabId } from './Sidebar';
@@ -14,6 +15,8 @@ import { DailyReportManager } from '../daily-reports/DailyReportManager';
 import { SupabaseConfigModal } from '../config/SupabaseConfigModal';
 import { SecurityView } from '../account/SecurityView';
 import { useAuth } from '../../context/AuthContext';
+
+const SIDEBAR_COLLAPSED_KEY = 'sidebar_collapsed';
 
 export const AppLayout: React.FC = () => {
   // Sync tab with URL hash if present
@@ -32,6 +35,22 @@ export const AppLayout: React.FC = () => {
   const [activeTab, setActiveTab] = useState<NavTabId>(getInitialTab);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState<boolean>(false);
   const [isConfigModalOpen, setIsConfigModalOpen] = useState<boolean>(false);
+
+  // Initialize Desktop Sidebar collapsed state
+  const [isCollapsed, setIsCollapsed] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    const stored = localStorage.getItem(SIDEBAR_COLLAPSED_KEY);
+    if (stored !== null) {
+      return stored === 'true';
+    }
+    // Tablet default: collapsed (768 - 1023px)
+    if (window.innerWidth >= 768 && window.innerWidth < 1024) {
+      return true;
+    }
+    // Desktop default: expanded (>= 1024px)
+    return false;
+  });
+
   const { isAdmin, refreshProfile } = useAuth();
 
   // Listen to window hash changes
@@ -52,6 +71,32 @@ export const AppLayout: React.FC = () => {
     return () => window.removeEventListener('hashchange', handleHashChange);
   }, []);
 
+  // Handle window resize for adaptive collapse
+  useEffect(() => {
+    const handleResize = () => {
+      const width = window.innerWidth;
+      // Close mobile drawer if resized to desktop
+      if (width >= 768) {
+        setIsMobileSidebarOpen(false);
+      }
+    };
+
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  const handleToggleCollapse = () => {
+    setIsCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(next));
+      } catch {
+        // Safe fallback for restricted storage environments
+      }
+      return next;
+    });
+  };
+
   const handleSelectTab = (tab: NavTabId) => {
     setActiveTab(tab);
     window.location.hash = `#/${tab}`;
@@ -61,13 +106,15 @@ export const AppLayout: React.FC = () => {
   const safeTab: NavTabId = activeTab === 'admin' && !isAdmin ? 'overview' : activeTab;
 
   return (
-    <div id="app-container" className="flex min-h-screen bg-slate-100/70">
+    <div id="app-container" className="flex min-h-screen bg-slate-100/70 antialiased overflow-x-hidden">
       {/* Navigation Sidebar */}
       <Sidebar
         activeTab={safeTab}
         onSelectTab={handleSelectTab}
         isMobileOpen={isMobileSidebarOpen}
         onCloseMobile={() => setIsMobileSidebarOpen(false)}
+        isCollapsed={isCollapsed}
+        onToggleCollapse={handleToggleCollapse}
       />
 
       {/* Main Content Viewport */}
