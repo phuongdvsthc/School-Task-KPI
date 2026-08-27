@@ -10,6 +10,7 @@ import { TaskList } from '../tasks/TaskList';
 import { MetricEntryView } from '../metrics/MetricEntryView';
 import { AdminLayout } from '../admin/AdminLayout';
 import { PlaceholderView } from '../common/PlaceholderView';
+import { DailyReportManager } from '../daily-reports/DailyReportManager';
 import { SupabaseConfigModal } from '../config/SupabaseConfigModal';
 import { SecurityView } from '../account/SecurityView';
 import { useAuth } from '../../context/AuthContext';
@@ -23,6 +24,7 @@ export const AppLayout: React.FC = () => {
     if (hash === 'tasks') return 'tasks';
     if (hash === 'kpis') return 'kpis';
     if (hash === 'reports') return 'reports';
+    if (hash.startsWith('daily-reports')) return 'daily-reports';
     if (hash === 'account/security') return 'account/security';
     return 'overview';
   };
@@ -41,6 +43,7 @@ export const AppLayout: React.FC = () => {
       else if (hash === 'tasks') setActiveTab('tasks');
       else if (hash === 'kpis') setActiveTab('kpis');
       else if (hash === 'reports') setActiveTab('reports');
+      else if (hash.startsWith('daily-reports')) setActiveTab('daily-reports');
       else if (hash === 'account/security') setActiveTab('account/security');
       else if (hash === 'overview' || hash === '') setActiveTab('overview');
     };
@@ -83,6 +86,8 @@ export const AppLayout: React.FC = () => {
               <TaskList />
             ) : safeTab === 'metrics' ? (
               <MetricEntryView />
+            ) : safeTab === 'daily-reports' ? (
+              <DailyReportManager />
             ) : safeTab === 'account/security' ? (
               <SecurityView />
             ) : safeTab === 'admin' ? (

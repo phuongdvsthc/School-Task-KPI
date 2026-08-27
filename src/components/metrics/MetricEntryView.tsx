@@ -28,6 +28,7 @@ import {
 } from '../../types/metric';
 import { OrganizationUnit } from '../../types/database';
 import { metricService } from '../../services/metric.service';
+import { profileService } from '../../services/profileService';
 import { organizationService } from '../../services/organizationService';
 import { MetricCategoryGroup } from './MetricCategoryGroup';
 import { MetricHistoryModal } from './MetricHistoryModal';
@@ -76,9 +77,12 @@ export const MetricEntryView: React.FC = () => {
   });
 
   const [availableUnits, setAvailableUnits] = useState<OrganizationUnit[]>([]);
+  const [availableUsers, setAvailableUsers] = useState<any[]>([]);
+  const [selectedUserId, setSelectedUserId] = useState<string>('');
   const [metricDefs, setMetricDefs] = useState<MetricDefinition[]>([]);
   const [existingEntries, setExistingEntries] = useState<MetricEntry[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
 
   // 4. State nhập liệu: Lưu giữ giá trị thay đổi trên form
@@ -111,8 +115,18 @@ export const MetricEntryView: React.FC = () => {
         console.error('Lỗi tải danh sách đơn vị:', err);
       }
     };
-
     fetchUnits();
+  }, [isAdmin]);
+
+  useEffect(() => {
+    if (isAdmin && selectedUnitId) {
+      profileService.getProfiles(selectedUnitId).then((users) => {
+        setAvailableUsers(users.filter(u => u.is_active));
+        if (users.length > 0 && !selectedUserId) {
+          setSelectedUserId(users[0].id);
+        }
+      }).catch(console.error);
+    }
   }, [isAdmin, selectedUnitId]);
 
   // Đảm bảo user thường luôn chọn đúng đơn vị của mình
@@ -127,29 +141,37 @@ export const MetricEntryView: React.FC = () => {
     if (!user) return;
     setIsLoading(true);
     setSaveAllFeedback(null);
-
+    setLoadError(null);
     try {
-      // 1. Lấy metric definitions thỏa mãn: is_active = true, allow_manual_entry = true, thuộc đơn vị được chọn
-      const defs = await metricService.getActiveMetricsForUser(
+      // 1. Lấy metric definitions
+      const defs = await metricService.getActiveMetricsForEntry(
         user.id,
         selectedUnitId || undefined
       );
       setMetricDefs(defs);
 
-      // 2. Lấy metric entries đã có trong ngày được chọn
-      const entries = await metricService.getMetricEntriesByDate({
-        organization_unit_id: selectedUnitId || undefined,
-        period_date: selectedDate,
-        user_id: isAdmin || isManager ? undefined : user.id,
+      // 2. Lấy metric entries đã có.
+      const entryPromises = defs.map(async (def) => {
+         const period = metricService.calculateMetricPeriod(def.frequency || 'daily', new Date(selectedDate));
+         const entries = await metricService.getMetricEntriesForPeriod({
+            organization_unit_id: selectedUnitId || undefined,
+            user_id: def.measurement_scope === 'unit' ? undefined : (isAdmin ? selectedUserId : user.id),
+            period_start: period.period_start,
+            period_end: period.period_end
+         });
+         return { defId: def.id, entry: entries.find(e => e.metric_definition_id === def.id) };
       });
-      setExistingEntries(entries);
+      
+      const loadedEntries = await Promise.all(entryPromises);
+      const validEntries = loadedEntries.map(e => e.entry).filter(Boolean) as MetricEntry[];
+      
+      setExistingEntries(validEntries);
 
       // 3. Khởi tạo maps giá trị và ghi chú từ database
       const newValues: Record<string, string | number> = {};
       const newNotes: Record<string, string> = {};
-
       defs.forEach((def) => {
-        const found = entries.find((e) => e.metric_definition_id === def.id);
+        const found = loadedEntries.find((e) => e.defId === def.id)?.entry;
         if (found) {
           newValues[def.id] = found.value;
           newNotes[def.id] = found.note || '';
@@ -158,16 +180,16 @@ export const MetricEntryView: React.FC = () => {
           newNotes[def.id] = '';
         }
       });
-
       setValuesMap(newValues);
       setNotesMap(newNotes);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Lỗi tải dữ liệu chỉ số:', err);
+      setLoadError(err.message || 'Lỗi không xác định');
     } finally {
       setIsLoading(false);
       setIsRefreshing(false);
     }
-  }, [user, selectedUnitId, selectedDate, isAdmin, isManager]);
+  }, [user, selectedUnitId, selectedUserId, selectedDate, isAdmin, isManager]);
 
   useEffect(() => {
     loadData();
@@ -199,47 +221,45 @@ export const MetricEntryView: React.FC = () => {
   // Xử lý lưu 1 chỉ số đơn lẻ
   const handleSaveSingle = async (metricId: string) => {
     if (isReadOnly || !user) return;
+
     const valStr = valuesMap[metricId];
     if (valStr === '' || valStr === undefined) return;
-
     const numValue = Number(valStr);
     if (isNaN(numValue)) {
       alert('Vui lòng nhập giá trị số hợp lệ.');
       return;
     }
 
+    const metric = metricDefs.find(m => m.id === metricId);
+    if (!metric) return;
+
     setSavingMap((prev) => ({ ...prev, [metricId]: true }));
     setSaveAllFeedback(null);
+
+    const period = metricService.calculateMetricPeriod(metric.frequency || 'daily', new Date(selectedDate));
 
     try {
       const payload: SaveMetricEntryPayload = {
         metric_definition_id: metricId,
-        organization_unit_id: selectedUnitId || null,
-        user_id: user.id,
-        period_date: selectedDate,
+        organization_unit_id: selectedUnitId || undefined,
+        user_id: metric.measurement_scope === 'unit' ? undefined : (isAdmin ? selectedUserId : user.id),
+        period_start: period.period_start,
+        period_end: period.period_end,
         value: numValue,
         note: notesMap[metricId] || null,
         source_type: 'manual',
       };
 
-      const savedEntry = await metricService.saveMetricEntry(payload, user.id);
+      const saved = await metricService.saveMetricEntry(payload, user.id);
 
-      // Cập nhật lại existingEntries
       setExistingEntries((prev) => {
-        const next = [...prev];
-        const idx = next.findIndex(
-          (e) =>
-            e.metric_definition_id === metricId &&
-            e.period_date === selectedDate &&
-            (e.organization_unit_id || null) === (selectedUnitId || null) &&
-            (e.user_id || null) === user.id
-        );
-        if (idx !== -1) {
-          next[idx] = savedEntry;
-        } else {
-          next.unshift(savedEntry);
+        const idx = prev.findIndex((e) => e.id === saved.id || (e.metric_definition_id === saved.metric_definition_id && e.period_start === saved.period_start && e.period_end === saved.period_end));
+        if (idx >= 0) {
+          const next = [...prev];
+          next[idx] = saved;
+          return next;
         }
-        return next;
+        return [...prev, saved];
       });
 
       setSavedSuccessMap((prev) => ({ ...prev, [metricId]: true }));
@@ -247,7 +267,7 @@ export const MetricEntryView: React.FC = () => {
         setSavedSuccessMap((prev) => ({ ...prev, [metricId]: false }));
       }, 3000);
     } catch (err: any) {
-      alert(`Lỗi khi lưu: ${err.message || 'Không thể lưu kết quả chỉ số'}`);
+      alert('Lỗi lưu chỉ số: ' + err.message);
     } finally {
       setSavingMap((prev) => ({ ...prev, [metricId]: false }));
     }
@@ -257,64 +277,64 @@ export const MetricEntryView: React.FC = () => {
   const handleSaveAll = async () => {
     if (isReadOnly || !user) return;
 
-    // Lọc ra các chỉ số có giá trị được nhập
-    const entriesToSave: SaveMetricEntryPayload[] = [];
-
-    metricDefs.forEach((def) => {
-      const val = valuesMap[def.id];
-      if (val !== '' && val !== undefined) {
-        const numValue = Number(val);
-        if (!isNaN(numValue)) {
-          entriesToSave.push({
-            metric_definition_id: def.id,
-            organization_unit_id: selectedUnitId || null,
-            user_id: user.id,
-            period_date: selectedDate,
-            value: numValue,
-            note: notesMap[def.id] || null,
-            source_type: 'manual',
-          });
-        }
-      }
+    const pendingMetrics = metricDefs.filter((def) => {
+      const valStr = valuesMap[def.id];
+      const isDirty = !savedSuccessMap[def.id] && valStr !== '' && valStr !== undefined && !isNaN(Number(valStr));
+      return isDirty;
     });
 
-    if (entriesToSave.length === 0) {
-      alert('Chưa có chỉ số nào được nhập giá trị.');
+    if (pendingMetrics.length === 0) {
+      setSaveAllFeedback({ type: 'success', message: 'Không có dữ liệu mới nào cần lưu.' });
       return;
     }
 
     setIsSavingAll(true);
     setSaveAllFeedback(null);
 
-    try {
-      const savedResults = await metricService.saveMetricEntries(entriesToSave, user.id);
-      
-      // Reload lại danh sách entries để đồng bộ giao diện
-      const updatedEntries = await metricService.getMetricEntriesByDate({
+    const payloads: SaveMetricEntryPayload[] = pendingMetrics.map((def) => {
+      const period = metricService.calculateMetricPeriod(def.frequency || 'daily', new Date(selectedDate));
+      return {
+        metric_definition_id: def.id,
         organization_unit_id: selectedUnitId || undefined,
-        period_date: selectedDate,
-        user_id: isAdmin || isManager ? undefined : user.id,
+        user_id: def.measurement_scope === 'unit' ? undefined : (isAdmin ? selectedUserId : user.id),
+        period_start: period.period_start,
+        period_end: period.period_end,
+        value: Number(valuesMap[def.id]),
+        note: notesMap[def.id] || null,
+        source_type: 'manual',
+      };
+    });
+
+    try {
+      const savedEntries = await metricService.saveMetricEntries(payloads, user.id);
+      
+      setExistingEntries((prev) => {
+        const next = [...prev];
+        savedEntries.forEach((saved) => {
+          const idx = next.findIndex((e) => e.id === saved.id || (e.metric_definition_id === saved.metric_definition_id && e.period_start === saved.period_start && e.period_end === saved.period_end));
+          if (idx >= 0) {
+            next[idx] = saved;
+          } else {
+            next.push(saved);
+          }
+        });
+        return next;
       });
-      setExistingEntries(updatedEntries);
+
+      const newSavedMap = { ...savedSuccessMap };
+      pendingMetrics.forEach((def) => {
+        newSavedMap[def.id] = true;
+      });
+      setSavedSuccessMap(newSavedMap);
 
       setSaveAllFeedback({
         type: 'success',
-        message: `Đã lưu thành công ${savedResults.length} kết quả chỉ số cho ngày ${new Date(selectedDate).toLocaleDateString('vi-VN')}!`,
+        message: `Đã lưu thành công ${savedEntries.length} chỉ số!`,
       });
-
-      // Mark all as saved
-      const allSuccess: Record<string, boolean> = {};
-      entriesToSave.forEach((item) => {
-        allSuccess[item.metric_definition_id] = true;
-      });
-      setSavedSuccessMap(allSuccess);
-      setTimeout(() => {
-        setSavedSuccessMap({});
-      }, 3500);
     } catch (err: any) {
       setSaveAllFeedback({
         type: 'error',
-        message: `Lỗi khi lưu đồng loạt: ${err.message || 'Thao tác không thành công.'}`,
+        message: 'Lỗi lưu một số chỉ số: ' + err.message,
       });
     } finally {
       setIsSavingAll(false);
@@ -521,24 +541,44 @@ export const MetricEntryView: React.FC = () => {
 
           {/* Unit Selector (For Admin) */}
           {isAdmin && (
-            <div className="flex items-center gap-2">
-              <Building2 className="h-4 w-4 text-slate-500" />
-              <label htmlFor="admin-unit-select" className="text-xs font-bold text-slate-700">
-                Đơn vị:
-              </label>
-              <select
-                id="admin-unit-select"
-                value={selectedUnitId}
-                onChange={(e) => setSelectedUnitId(e.target.value)}
-                className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-800 focus:border-indigo-600 focus:outline-hidden"
-              >
-                <option value="">Tất cả đơn vị / Dùng chung</option>
-                {availableUnits.map((u) => (
-                  <option key={u.id} value={u.id}>
-                    {u.name} ({u.code})
-                  </option>
-                ))}
-              </select>
+            <div className="flex items-center gap-4">
+              <div className="flex items-center gap-2">
+                <Building2 className="h-4 w-4 text-slate-500" />
+                <label htmlFor="admin-unit-select" className="text-xs font-bold text-slate-700">
+                  Đơn vị:
+                </label>
+                <select
+                  id="admin-unit-select"
+                  value={selectedUnitId}
+                  onChange={(e) => setSelectedUnitId(e.target.value)}
+                  className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-800 focus:border-indigo-600 focus:outline-hidden"
+                >
+                  <option value="">Tất cả đơn vị</option>
+                  {availableUnits.map((u) => (
+                    <option key={u.id} value={u.id}>
+                      {u.name} ({u.code})
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex items-center gap-2">
+                <label htmlFor="admin-user-select" className="text-xs font-bold text-slate-700">
+                  Thành viên (cho Metric Cá nhân):
+                </label>
+                <select
+                  id="admin-user-select"
+                  value={selectedUserId}
+                  onChange={(e) => setSelectedUserId(e.target.value)}
+                  className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-800 focus:border-indigo-600 focus:outline-hidden"
+                >
+                  <option value="">-- Chọn thành viên --</option>
+                  {availableUsers.map((u) => (
+                    <option key={u.id} value={u.id}>
+                      {u.full_name} ({u.employee_code})
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
           )}
         </div>

@@ -574,7 +574,7 @@ export const taskService = {
     if (!supabase) return { success: false, error: 'Supabase chua san sang' };
 
     try {
-      const { error } = await supabase.from('task_evidence').insert({
+      const { error } = await (supabase.from('task_evidence') as any).insert({
         task_id: payload.taskId,
         uploaded_by: payload.uploadedBy,
         evidence_type: 'link',
@@ -618,7 +618,7 @@ export const taskService = {
       if (uploadError) return { success: false, error: uploadError.message };
       
       // Insert to DB
-      const { error: dbError } = await supabase.from('task_evidence').insert({
+      const { error: dbError } = await (supabase.from('task_evidence') as any).insert({
         task_id: payload.taskId,
         uploaded_by: payload.uploadedBy,
         evidence_type: payload.evidenceType || 'document',
@@ -701,7 +701,7 @@ export const taskService = {
 
     try {
       if (!content || !content.trim()) return { success: false, error: 'Nội dung rỗng' };
-      const { error } = await supabase.from('task_comments').update({ content: content.trim(), updated_at: new Date().toISOString() }).eq('id', commentId);
+      const { error } = await (supabase.from('task_comments') as any).update({ content: content.trim(), updated_at: new Date().toISOString() }).eq('id', commentId);
       if (error) return { success: false, error: error.message };
       return { success: true };
     } catch (err: any) {

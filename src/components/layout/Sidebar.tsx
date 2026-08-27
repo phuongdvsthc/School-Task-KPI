@@ -23,7 +23,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 
-export type NavTabId = 'overview' | 'tasks' | 'metrics' | 'kpis' | 'reports' | 'admin' | 'account/security';
+export type NavTabId = 'overview' | 'tasks' | 'metrics' | 'kpis' | 'reports' | 'daily-reports' | 'admin' | 'account/security';
 
 interface SidebarProps {
   activeTab: NavTabId;
@@ -62,9 +62,14 @@ const MENU_ITEMS: MenuItem[] = [
     icon: Target,
   },
   {
-    id: 'reports',
-    label: 'Báo cáo',
+    id: 'daily-reports',
+    label: 'Báo cáo hằng ngày',
     icon: FileText,
+  },
+  {
+    id: 'reports',
+    label: 'Tổng hợp',
+    icon: BarChart3,
   },
   {
     id: 'admin',

@@ -132,205 +132,146 @@ export const metricService = {
    * - allow_manual_entry = true
    * - Thuộc organization_unit của người dùng (hoặc dùng chung toàn trường: organization_unit_id is null)
    */
-  async getActiveMetricsForUser(userId: string, unitId?: string | null): Promise<MetricDefinition[]> {
+  async getActiveMetricsForEntry(userId: string, unitId?: string | null): Promise<MetricDefinition[]> {
     const supabase = getSupabaseClient();
     if (!supabase) {
-      return [];
+      throw new Error('Supabase client not initialized');
     }
 
-    try {
-      let query = (supabase.from('metric_definitions') as any)
-        .select('*')
-        .eq('is_active', true)
-        .eq('allow_manual_entry', true)
-        .order('sort_order', { ascending: true })
-        .order('name', { ascending: true });
+    const fetchWithRetry = async (queryFn: () => Promise<any>, retries = 3) => {
+      for (let i = 0; i < retries; i++) {
+        const res = await queryFn();
+        if (res.error && res.error.message && res.error.message.includes('JWT issued at future')) {
+          await new Promise(r => setTimeout(r, 1000));
+          continue;
+        }
+        return res;
+      }
+      return queryFn();
+    };
 
+    // 2. Fetch user role
+    const { data: profile, error: profileErr } = await fetchWithRetry(() => (supabase.from('profiles') as any).select('system_role').eq('id', userId).single());
+    if (profileErr) {
+      throw new Error('Không thể tải danh sách chỉ số: ' + profileErr.message);
+    }
+    const role = profile?.system_role || 'viewer';
+
+    // 3. Đọc organization_members để lấy organization_unit_id thật
+    const { data: orgMembers, error: memberErr } = await fetchWithRetry(() => (supabase.from('organization_members') as any)
+      .select('organization_unit_id, is_primary')
+      .eq('user_id', userId)
+      .order('is_primary', { ascending: false }));
+      
+    if (memberErr) {
+      throw new Error('Không thể tải danh sách chỉ số: ' + memberErr.message);
+    }
+
+    const primaryOrgMember = orgMembers && orgMembers.length > 0 ? orgMembers[0] : null;
+    const userUnitId = primaryOrgMember?.organization_unit_id;
+
+    // 10. Trong development hãy log
+    if (process.env.NODE_ENV === 'development') {
+      console.log('Current user ID:', userId);
+      console.log('System role:', role);
+      console.log('Primary organization ID:', userUnitId);
+    }
+
+    if (role === 'viewer' || role === 'executive') return [];
+
+    let query = (supabase.from('metric_definitions') as any)
+      .select('*')
+      .eq('is_active', true)
+      .eq('allow_manual_entry', true)
+      .eq('source_type', 'manual')
+      .order('sort_order', { ascending: true })
+      .order('name', { ascending: true });
+
+    if (role === 'staff') {
+      query = query.eq('measurement_scope', 'individual');
+      if (userUnitId) {
+        query = query.eq('organization_unit_id', userUnitId);
+      } else {
+        query = query.eq('organization_unit_id', '00000000-0000-0000-0000-000000000000'); // No unit, return none
+      }
+    } else if (role === 'manager') {
+      query = query.eq('measurement_scope', 'unit');
+      if (userUnitId) {
+        query = query.eq('organization_unit_id', userUnitId);
+      }
+    } else {
+      // Admin can see both individual and unit
       if (unitId && unitId !== 'all') {
-        query = query.or(`organization_unit_id.eq.${unitId},organization_unit_id.is.null`);
+        query = query.eq('organization_unit_id', unitId);
       }
-
-      const { data, error } = await query;
-
-      if (error) {
-        console.warn('[Metric Service] Error in getActiveMetricsForUser:', error.message);
-        return [];
-      }
-
-      const list: MetricDefinition[] = data || [];
-      const units = await organizationService.getUnits(false).catch(() => []);
-      const unitMap = new Map<string, OrganizationUnit>();
-      units.forEach((u) => unitMap.set(u.id, u));
-
-      return list.map((item) => ({
-        ...item,
-        unit_info: item.organization_unit_id ? unitMap.get(item.organization_unit_id) : undefined,
-      }));
-    } catch (err) {
-      console.warn('[Metric Service] Exception in getActiveMetricsForUser:', err);
-      return [];
     }
+
+    const { data, error } = await fetchWithRetry(() => query);
+
+    // 9. Không dùng fallback trả mảng [] khi query lỗi
+    if (error) {
+      throw new Error('Không thể tải danh sách chỉ số: ' + error.message);
+    }
+
+    const list: MetricDefinition[] = data || [];
+    
+    if (process.env.NODE_ENV === 'development') {
+       console.log('Metric query result count:', list.length);
+    }
+
+    // 11. Nếu role = staff và query trả 0 Metric, hiển thị debug message
+    if (role === 'staff' && list.length === 0 && process.env.NODE_ENV === 'development') {
+      console.log('Không tìm thấy Metric cá nhân phù hợp cho đơn vị hiện tại.');
+    }
+
+    const units = await organizationService.getUnits(false).catch(() => []);
+    const unitMap = new Map<string, OrganizationUnit>();
+    units.forEach((u) => unitMap.set(u.id, u));
+
+    return list.map((item) => ({
+      ...item,
+      unit_info: item.organization_unit_id ? unitMap.get(item.organization_unit_id) : undefined,
+    }));
   },
 
-  /**
-   * 4. Tạo mới một metric_definition (Admin only)
-   */
-  async createMetricDefinition(
-    payload: CreateMetricDefinitionPayload,
-    userId?: string
-  ): Promise<MetricDefinition> {
-    if (!payload.name?.trim()) {
-      throw new Error('Tên chỉ số không được để trống.');
-    }
-    if (!payload.code?.trim()) {
-      throw new Error('Mã chỉ số không được để trống.');
-    }
-
-    const supabase = getSupabaseClient();
-    if (!supabase) {
-      throw new Error('Supabase client chưa sẵn sàng');
-    }
-
-    const cleanCode = payload.code.trim().toUpperCase();
-
-    const newMetricData = {
-      organization_unit_id: payload.organization_unit_id || null,
-      code: cleanCode,
-      name: payload.name.trim(),
-      description: payload.description?.trim() || null,
-      category: payload.category || 'teaching',
-      data_type: payload.data_type || 'number',
-      unit: payload.unit?.trim() || 'đơn vị',
-      aggregation_type: payload.aggregation_type || 'sum',
-      frequency: payload.frequency || 'monthly',
-      target_direction: payload.target_direction || 'higher_is_better',
-      allow_manual_entry: payload.allow_manual_entry ?? true,
-      is_active: payload.is_active ?? true,
-      sort_order: Number(payload.sort_order) || 0,
-      created_by: userId || null,
-    };
-
-    try {
-      const { data, error } = await (supabase.from('metric_definitions') as any)
-        .insert(newMetricData)
-        .select()
-        .single();
-
-      if (error) {
-        throw new Error(error.message || 'Lỗi khi tạo chỉ số mới');
-      }
-
-      return this._enrichMetricWithDetails(data);
-    } catch (err: any) {
-      throw new Error(err.message || 'Lỗi kết nối Supabase khi tạo chỉ số');
-    }
-  },
-
-  /**
-   * 5. Cập nhật metric_definition (Admin only)
-   */
-  async updateMetricDefinition(
-    id: string,
-    updates: UpdateMetricDefinitionPayload
-  ): Promise<MetricDefinition> {
-    const supabase = getSupabaseClient();
-    if (!supabase) {
-      throw new Error('Supabase client chưa sẵn sàng');
-    }
-
-    const now = new Date().toISOString();
-    const cleanUpdates: any = {
-      updated_at: now,
-    };
-
-    if (updates.name !== undefined) cleanUpdates.name = updates.name.trim();
-    if (updates.code !== undefined) cleanUpdates.code = updates.code.trim().toUpperCase();
-    if (updates.organization_unit_id !== undefined) cleanUpdates.organization_unit_id = updates.organization_unit_id || null;
-    if (updates.description !== undefined) cleanUpdates.description = updates.description ? updates.description.trim() : null;
-    if (updates.category !== undefined) cleanUpdates.category = updates.category;
-    if (updates.data_type !== undefined) cleanUpdates.data_type = updates.data_type;
-    if (updates.unit !== undefined) cleanUpdates.unit = updates.unit.trim();
-    if (updates.aggregation_type !== undefined) cleanUpdates.aggregation_type = updates.aggregation_type;
-    if (updates.frequency !== undefined) cleanUpdates.frequency = updates.frequency;
-    if (updates.target_direction !== undefined) cleanUpdates.target_direction = updates.target_direction;
-    if (updates.allow_manual_entry !== undefined) cleanUpdates.allow_manual_entry = updates.allow_manual_entry;
-    if (updates.sort_order !== undefined) cleanUpdates.sort_order = Number(updates.sort_order) || 0;
-    if (updates.is_active !== undefined) cleanUpdates.is_active = updates.is_active;
-
-    try {
-      const { data, error } = await (supabase.from('metric_definitions') as any)
-        .update(cleanUpdates)
-        .eq('id', id)
-        .select()
-        .single();
-
-      if (error) {
-        throw new Error(error.message || 'Lỗi cập nhật chỉ số');
-      }
-
-      return this._enrichMetricWithDetails(data);
-    } catch (err: any) {
-      throw new Error(err.message || 'Lỗi cập nhật chỉ số');
-    }
-  },
-
-  /**
-   * 6. Bật / Tắt trạng thái chỉ số (is_active)
-   * Không xóa vật lý dữ liệu đã từng có
-   */
-  async toggleMetricDefinition(id: string, targetActive?: boolean): Promise<MetricDefinition> {
-    const current = await this.getMetricDefinitionById(id);
-    const newStatus = targetActive !== undefined ? targetActive : !current.is_active;
-
-    return this.updateMetricDefinition(id, {
-      is_active: newStatus,
-    });
-  },
-
-  // =========================================================================
-  // METRIC ENTRIES (Dữ liệu Nhập liệu / Thu thập kết quả)
-  // =========================================================================
-
-  /**
-   * 7. Lấy danh sách kết quả nhập liệu metric_entries kèm bộ lọc
-   */
   async getMetricEntries(filters?: MetricEntriesFilterOptions): Promise<MetricEntry[]> {
     const supabase = getSupabaseClient();
     if (!supabase) {
       return [];
     }
 
+    const fetchWithRetry = async (queryFn: () => Promise<any>, retries = 3) => {
+      for (let i = 0; i < retries; i++) {
+        const res = await queryFn();
+        if (res.error && res.error.message && res.error.message.includes('JWT issued at future')) {
+          await new Promise(r => setTimeout(r, 1000));
+          continue;
+        }
+        return res;
+      }
+      return queryFn();
+    };
+
     try {
       let query = (supabase.from('metric_entries') as any)
         .select('*')
-        .order('period_date', { ascending: false })
+        .order('period_start', { ascending: false })
         .order('created_at', { ascending: false });
 
       if (filters?.organization_unit_id && filters.organization_unit_id !== 'all') {
         query = query.eq('organization_unit_id', filters.organization_unit_id);
       }
-
       if (filters?.user_id && filters.user_id !== 'all') {
         query = query.eq('user_id', filters.user_id);
       }
-
-      if (filters?.period_date) {
-        query = query.eq('period_date', filters.period_date);
+      if (filters?.period_start) {
+        query = query.eq('period_start', filters.period_start);
+      }
+      if (filters?.period_end) {
+        query = query.eq('period_end', filters.period_end);
       }
 
-      if (filters?.startDate) {
-        query = query.gte('period_date', filters.startDate);
-      }
-
-      if (filters?.endDate) {
-        query = query.lte('period_date', filters.endDate);
-      }
-
-      if (filters?.metric_definition_id) {
-        query = query.eq('metric_definition_id', filters.metric_definition_id);
-      }
-
-      const { data, error } = await query;
+      const { data, error } = await fetchWithRetry(() => query);
 
       if (error) {
         console.warn('[Metric Service] Error in getMetricEntries:', error.message);
@@ -346,17 +287,18 @@ export const metricService = {
   },
 
   /**
-   * 8. Lấy danh sách kết quả theo ngày cụ thể (getMetricEntriesByDate)
+   * 8. Lấy danh sách kết quả theo ngày cụ thể (getMetricEntriesForPeriod)
    */
-  async getMetricEntriesByDate(params: {
+  async getMetricEntriesForPeriod(params: {
     organization_unit_id?: string | null;
     user_id?: string | null;
-    period_date: string;
+    period_start: string;
+  period_end: string;
   }): Promise<MetricEntry[]> {
     return this.getMetricEntries({
       organization_unit_id: params.organization_unit_id || undefined,
       user_id: params.user_id || undefined,
-      period_date: params.period_date,
+      period_start: params.period_start, period_end: params.period_end,
     });
   },
 
@@ -372,8 +314,8 @@ export const metricService = {
     if (!payload.metric_definition_id) {
       throw new Error('Vui lòng chọn chỉ số cần nhập kết quả.');
     }
-    if (!payload.period_date) {
-      throw new Error('Ngày ghi nhận (period_date) không được để trống.');
+    if (!payload.period_start || !payload.period_end) {
+      throw new Error('Kỳ báo cáo không được để trống.');
     }
 
     const supabase = getSupabaseClient();
@@ -392,7 +334,7 @@ export const metricService = {
       let checkQuery = (supabase.from('metric_entries') as any)
         .select('id')
         .eq('metric_definition_id', payload.metric_definition_id)
-        .eq('period_date', payload.period_date);
+        .eq('period_start', payload.period_start).eq('period_end', payload.period_end);
 
       if (cleanUnitId) {
         checkQuery = checkQuery.eq('organization_unit_id', cleanUnitId);
@@ -422,7 +364,14 @@ export const metricService = {
           .select()
           .single();
 
-        if (error) throw error;
+        
+        if (error) {
+          if (error.code === '23505') {
+            // unique violation, retry recursively or fetch and update
+            return this.saveMetricEntry(payload, currentUserId);
+          }
+          throw error;
+        }
         return this._enrichMetricEntryWithDetails(data);
       } else {
         // INSERT
@@ -431,7 +380,7 @@ export const metricService = {
             metric_definition_id: payload.metric_definition_id,
             organization_unit_id: cleanUnitId,
             user_id: cleanUserId,
-            period_date: payload.period_date,
+            period_start: payload.period_start, period_end: payload.period_end,
             value: numValue,
             note: cleanNote,
             source_type: 'manual',
@@ -441,7 +390,14 @@ export const metricService = {
           .select()
           .single();
 
-        if (error) throw error;
+        
+        if (error) {
+          if (error.code === '23505') {
+            // unique violation, retry recursively or fetch and update
+            return this.saveMetricEntry(payload, currentUserId);
+          }
+          throw error;
+        }
         return this._enrichMetricEntryWithDetails(data);
       }
     } catch (err: any) {
@@ -474,8 +430,42 @@ export const metricService = {
   /**
    * Helper: Kiểm tra metric đã có dữ liệu nhập chưa
    */
+  
+  calculateMetricPeriod(frequency: string, selectedDate: Date) {
+    let start = new Date(selectedDate);
+    let end = new Date(selectedDate);
+    start.setHours(0, 0, 0, 0);
+    end.setHours(23, 59, 59, 999);
+
+    if (frequency === 'weekly') {
+      const day = start.getDay();
+      const diff = start.getDate() - day + (day === 0 ? -6 : 1); // Adjust to Monday
+      start.setDate(diff);
+      end = new Date(start);
+      end.setDate(start.getDate() + 6);
+      end.setHours(23, 59, 59, 999);
+    } else if (frequency === 'monthly') {
+      start.setDate(1);
+      end = new Date(start.getFullYear(), start.getMonth() + 1, 0, 23, 59, 59, 999);
+    } else if (frequency === 'quarterly') {
+      const q = Math.floor(start.getMonth() / 3);
+      start = new Date(start.getFullYear(), q * 3, 1);
+      end = new Date(start.getFullYear(), q * 3 + 3, 0, 23, 59, 59, 999);
+    } else if (frequency === 'yearly') {
+      start = new Date(start.getFullYear(), 0, 1);
+      end = new Date(start.getFullYear(), 11, 31, 23, 59, 59, 999);
+    }
+
+    const pad = (n: number) => n.toString().padStart(2, '0');
+    return {
+      period_start: `${start.getFullYear()}-${pad(start.getMonth() + 1)}-${pad(start.getDate())}`,
+      period_end: `${end.getFullYear()}-${pad(end.getMonth() + 1)}-${pad(end.getDate())}`
+    };
+  },
+
   async metricHasEntries(metricId: string): Promise<boolean> {
-    const count = await this.getMetricEntriesCount(metricId);
+    const count = await this.
+getMetricEntriesCount(metricId);
     return count > 0;
   },
 
@@ -532,7 +522,8 @@ export const metricService = {
       }
     }
 
-    const entries_count = await this.getMetricEntriesCount(metric.id).catch(() => 0);
+    const entries_count = await this.
+getMetricEntriesCount(metric.id).catch(() => 0);
 
     return {
       ...metric,
@@ -540,6 +531,65 @@ export const metricService = {
       creator_profile,
       entries_count,
     };
+  },
+
+  
+  async createMetricDefinition(
+    payload: any,
+    userId?: string
+  ): Promise<MetricDefinition> {
+    const supabase = getSupabaseClient();
+    if (!supabase) throw new Error('Supabase client not initialized');
+
+    const { data, error } = await (supabase.from('metric_definitions') as any)
+      .insert([{
+        ...payload,
+        created_by: userId,
+      }])
+      .select()
+      .single();
+
+    if (error) {
+        if (error.code === '23505') throw new Error('Mã chỉ số đã tồn tại. Vui lòng chọn mã khác.');
+        throw error;
+    }
+    return data as MetricDefinition;
+  },
+
+  async updateMetricDefinition(
+    id: string,
+    updates: any
+  ): Promise<MetricDefinition> {
+    const supabase = getSupabaseClient();
+    if (!supabase) throw new Error('Supabase client not initialized');
+
+    const { data, error } = await (supabase.from('metric_definitions') as any)
+      .update(updates)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) {
+        if (error.code === '23505') throw new Error('Mã chỉ số đã tồn tại. Vui lòng chọn mã khác.');
+        throw error;
+    }
+    return data as MetricDefinition;
+  },
+
+  async toggleMetricDefinition(id: string, is_active?: boolean): Promise<void> {
+    const supabase = getSupabaseClient();
+    if (!supabase) throw new Error('Supabase client not initialized');
+    
+    if (is_active === undefined) {
+      const { data } = await (supabase.from('metric_definitions') as any).select('is_active').eq('id', id).single();
+      is_active = !data?.is_active;
+    }
+
+    const { error } = await (supabase.from('metric_definitions') as any)
+      .update({ is_active })
+      .eq('id', id);
+
+    if (error) throw error;
   },
 
   async _enrichMetricEntryWithDetails(entry: MetricEntry): Promise<MetricEntry> {
@@ -587,17 +637,18 @@ export const getMetricDefinitions = (filters?: MetricFilterOptions) =>
 export const getMetricDefinitionById = (id: string) =>
   metricService.getMetricDefinitionById(id);
 
-export const getActiveMetricsForUser = (userId: string, unitId?: string | null) =>
-  metricService.getActiveMetricsForUser(userId, unitId);
+export const getActiveMetricsForEntry = (userId: string, unitId?: string | null) =>
+  metricService.getActiveMetricsForEntry(userId, unitId);
 
 export const getMetricEntries = (filters?: MetricEntriesFilterOptions) =>
   metricService.getMetricEntries(filters);
 
-export const getMetricEntriesByDate = (params: {
+export const getMetricEntriesForPeriod = (params: {
   organization_unit_id?: string | null;
   user_id?: string | null;
-  period_date: string;
-}) => metricService.getMetricEntriesByDate(params);
+  period_start: string;
+  period_end: string;
+}) => metricService.getMetricEntriesForPeriod(params);
 
 export const saveMetricEntry = (payload: SaveMetricEntryPayload, currentUserId: string) =>
   metricService.saveMetricEntry(payload, currentUserId);
@@ -612,6 +663,7 @@ export const updateMetricDefinition = (id: string, updates: UpdateMetricDefiniti
   metricService.updateMetricDefinition(id, updates);
 
 export const metricHasEntries = (id: string) => metricService.metricHasEntries(id);
+export const calculateMetricPeriod = (f: string, d: Date) => metricService.calculateMetricPeriod(f, d);
 export const getMetricOrganizations = () => metricService.getMetricOrganizations();
 export const toggleMetricDefinition = (id: string, is_active?: boolean) =>
   metricService.toggleMetricDefinition(id, is_active);

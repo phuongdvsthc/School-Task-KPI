@@ -73,8 +73,6 @@ export interface MetricDefinition {
   description: string | null;
   category: MetricCategory | string;
   measurement_scope: MeasurementScope | string;
-  source_type?: MetricSourceType | string;
-  measurement_scope: MeasurementScope | string;
   source_type: MetricSourceType | string;
   data_type: MetricDataType | string;
   unit: string;
@@ -102,7 +100,8 @@ export interface MetricEntry {
   metric_definition_id: string;
   organization_unit_id: string | null;
   user_id: string | null;
-  period_date: string;
+  period_start: string;
+  period_end: string;
   value: number;
   note: string | null;
   source_type: string;
@@ -176,7 +175,8 @@ export interface SaveMetricEntryPayload {
   metric_definition_id: string;
   organization_unit_id?: string | null;
   user_id?: string | null;
-  period_date: string; // YYYY-MM-DD
+  period_start: string;
+  period_end: string;
   value: number;
   note?: string | null;
   source_type?: string; // 'manual'
@@ -189,7 +189,8 @@ export interface SaveMetricEntryPayload {
 export interface MetricEntriesFilterOptions {
   organization_unit_id?: string;
   user_id?: string;
-  period_date?: string;
+  period_start?: string;
+  period_end?: string;
   startDate?: string;
   endDate?: string;
   metric_definition_id?: string;

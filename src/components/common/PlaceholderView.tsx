@@ -34,6 +34,15 @@ interface TabMeta {
 }
 
 const TAB_CONFIGS: Record<Exclude<NavTabId, 'overview'>, TabMeta> = {
+  'daily-reports': {
+    title: 'Báo cáo hằng ngày',
+    badge: 'Đang phát triển',
+    description: 'Quản lý báo cáo hằng ngày',
+    icon: FileText,
+    plannedFeatures: [],
+    dbIntegration: '',
+    readyForNextPhase: false
+  },
   tasks: {
     title: 'Phân hệ Quản lý Công Việc (Task Management)',
     badge: 'Sẵn sàng triển khai Giai đoạn 2',

@@ -28,6 +28,10 @@ interface HeaderProps {
 }
 
 const TAB_TITLES: Record<NavTabId, { title: string; subtitle: string }> = {
+  'daily-reports': {
+    title: 'Báo cáo hằng ngày',
+    subtitle: 'Nhập và quản lý báo cáo công việc hằng ngày',
+  },
   overview: {
     title: 'Tổng quan hệ thống',
     subtitle: 'Nền tảng quản lý công việc, KPI & báo cáo học đường',

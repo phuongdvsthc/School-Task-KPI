@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { MetricAdminView } from './metrics/MetricAdminView';
 import { UserManagementView } from './users/UserManagementView';
 import { UserForm } from './users/UserForm';
+import { OrganizationListView } from './organizations/OrganizationListView';
+import { OrganizationFormView } from './organizations/OrganizationFormView';
 
 export const AdminLayout: React.FC = () => {
   // Routes:
@@ -11,14 +13,15 @@ export const AdminLayout: React.FC = () => {
   // admin/users
   // admin/users/new
   // admin/users/:id/edit
-  const [currentRoute, setCurrentRoute] = useState<'metrics' | 'users' | 'users/new' | 'users/edit'>('users');
+  const [currentRoute, setCurrentRoute] = useState<'metrics' | 'users' | 'users/new' | 'users/edit' | 'orgs' | 'orgs/new' | 'orgs/edit'>('users');
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
+  const [selectedOrgId, setSelectedOrgId] = useState<string | null>(null);
 
   useEffect(() => {
     const handleHashChange = () => {
       const hash = window.location.hash.replace(/^#\/?/, '');
       if (hash.startsWith('admin/metrics')) {
-        setCurrentRoute('metrics'); // MetricAdminView handles its own sub-routing
+        setCurrentRoute('metrics');
       } else if (hash === 'admin/users/new') {
         setCurrentRoute('users/new');
         setSelectedUserId(null);
@@ -28,6 +31,17 @@ export const AdminLayout: React.FC = () => {
           setSelectedUserId(parts[2]);
           setCurrentRoute('users/edit');
         }
+      } else if (hash === 'admin/organization-units/new') {
+        setCurrentRoute('orgs/new');
+        setSelectedOrgId(null);
+      } else if (hash.startsWith('admin/organization-units/') && hash.endsWith('/edit')) {
+        const parts = hash.split('/');
+        if (parts.length >= 3) {
+          setSelectedOrgId(parts[2]);
+          setCurrentRoute('orgs/edit');
+        }
+      } else if (hash === 'admin/organization-units') {
+        setCurrentRoute('orgs');
       } else if (hash === 'admin/users' || hash === 'admin') {
         setCurrentRoute('users');
         setSelectedUserId(null);
@@ -43,15 +57,42 @@ export const AdminLayout: React.FC = () => {
     return (
       <div className="space-y-4">
         {/* Admin Tab Navigation */}
-        <div className="flex border-b border-slate-200 mb-6">
-          <a href="#/admin/users" className="px-4 py-2 text-sm font-medium text-slate-500 hover:text-indigo-600 hover:border-indigo-600 border-b-2 border-transparent transition-colors">
-            Quản lý Người dùng
-          </a>
-          <a href="#/admin/metrics" className="px-4 py-2 text-sm font-medium text-indigo-600 border-b-2 border-indigo-600">
-            Quản lý Chỉ số
-          </a>
-        </div>
+        <div className="flex border-b border-slate-200 mb-6 overflow-x-auto">
+        <a href="#/admin/users" className={`px-4 py-2 text-sm font-medium whitespace-nowrap transition-colors ${currentRoute.startsWith('users') ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-slate-500 hover:text-indigo-600 hover:border-indigo-600 border-b-2 border-transparent'}`}>
+          Quản lý Người dùng
+        </a>
+        <a href="#/admin/organization-units" className={`px-4 py-2 text-sm font-medium whitespace-nowrap transition-colors ${currentRoute.startsWith('orgs') ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-slate-500 hover:text-indigo-600 hover:border-indigo-600 border-b-2 border-transparent'}`}>
+          Cơ cấu tổ chức
+        </a>
+        <a href="#/admin/metrics" className={`px-4 py-2 text-sm font-medium whitespace-nowrap transition-colors ${currentRoute === 'metrics' ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-slate-500 hover:text-indigo-600 hover:border-indigo-600 border-b-2 border-transparent'}`}>
+          Quản lý Chỉ số
+        </a>
+      </div>
         <MetricAdminView />
+      </div>
+    );
+  }
+
+  
+  if (currentRoute === 'orgs/new' || currentRoute === 'orgs/edit') {
+    return <OrganizationFormView id={selectedOrgId || undefined} />;
+  }
+
+  if (currentRoute === 'orgs') {
+    return (
+      <div className="space-y-4">
+        <div className="flex border-b border-slate-200 mb-6 overflow-x-auto">
+        <a href="#/admin/users" className={`px-4 py-2 text-sm font-medium whitespace-nowrap transition-colors ${currentRoute.startsWith('users') ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-slate-500 hover:text-indigo-600 hover:border-indigo-600 border-b-2 border-transparent'}`}>
+          Quản lý Người dùng
+        </a>
+        <a href="#/admin/organization-units" className={`px-4 py-2 text-sm font-medium whitespace-nowrap transition-colors ${currentRoute.startsWith('orgs') ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-slate-500 hover:text-indigo-600 hover:border-indigo-600 border-b-2 border-transparent'}`}>
+          Cơ cấu tổ chức
+        </a>
+        <a href="#/admin/metrics" className={`px-4 py-2 text-sm font-medium whitespace-nowrap transition-colors ${currentRoute === 'metrics' ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-slate-500 hover:text-indigo-600 hover:border-indigo-600 border-b-2 border-transparent'}`}>
+          Quản lý Chỉ số
+        </a>
+      </div>
+        <OrganizationListView />
       </div>
     );
   }
@@ -63,11 +104,14 @@ export const AdminLayout: React.FC = () => {
   return (
     <div className="space-y-4">
       {/* Admin Tab Navigation */}
-      <div className="flex border-b border-slate-200 mb-6">
-        <a href="#/admin/users" className="px-4 py-2 text-sm font-medium text-indigo-600 border-b-2 border-indigo-600">
+      <div className="flex border-b border-slate-200 mb-6 overflow-x-auto">
+        <a href="#/admin/users" className={`px-4 py-2 text-sm font-medium whitespace-nowrap transition-colors ${currentRoute.startsWith('users') ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-slate-500 hover:text-indigo-600 hover:border-indigo-600 border-b-2 border-transparent'}`}>
           Quản lý Người dùng
         </a>
-        <a href="#/admin/metrics" className="px-4 py-2 text-sm font-medium text-slate-500 hover:text-indigo-600 hover:border-indigo-600 border-b-2 border-transparent transition-colors">
+        <a href="#/admin/organization-units" className={`px-4 py-2 text-sm font-medium whitespace-nowrap transition-colors ${currentRoute.startsWith('orgs') ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-slate-500 hover:text-indigo-600 hover:border-indigo-600 border-b-2 border-transparent'}`}>
+          Cơ cấu tổ chức
+        </a>
+        <a href="#/admin/metrics" className={`px-4 py-2 text-sm font-medium whitespace-nowrap transition-colors ${currentRoute === 'metrics' ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-slate-500 hover:text-indigo-600 hover:border-indigo-600 border-b-2 border-transparent'}`}>
           Quản lý Chỉ số
         </a>
       </div>
