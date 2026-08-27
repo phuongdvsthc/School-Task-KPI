@@ -1,5 +1,6 @@
 import React from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { SystemSettingsProvider } from './context/SystemSettingsContext';
 import { LoginView } from './components/auth/LoginView';
 import { AppLayout } from './components/layout/AppLayout';
 import { GraduationCap, Loader2 } from 'lucide-react';
@@ -32,9 +33,11 @@ const MainContent: React.FC = () => {
 
 export default function App() {
   return (
-    <AuthProvider>
+    <SystemSettingsProvider>
+      <AuthProvider>
       <MainContent />
     </AuthProvider>
+    </SystemSettingsProvider>
   );
 }
 

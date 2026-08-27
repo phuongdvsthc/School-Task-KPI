@@ -55,7 +55,7 @@ export const TaskList: React.FC = () => {
   const loadFilterData = async () => {
     try {
       const [uData, pData] = await Promise.all([
-        organizationService.getUnits(),
+        organizationService.getUnits(false),
         profileService.getAllProfiles(),
       ]);
       setUnits(uData);

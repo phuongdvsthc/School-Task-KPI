@@ -14,10 +14,13 @@ import {
   KeyRound
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { useSystemSettings } from '../../context/SystemSettingsContext';
+import { systemSettingsService } from '../../services/system-settings.service';
 import { SupabaseConfigModal } from '../config/SupabaseConfigModal';
 
 export const LoginView: React.FC = () => {
   const { signIn, isConfigured, isLoading } = useAuth();
+  const { settings } = useSystemSettings();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [formError, setFormError] = useState<string | null>(null);
@@ -49,15 +52,21 @@ export const LoginView: React.FC = () => {
         {/* Header */}
         <div className="space-y-4 text-center">
           <div className="flex items-center justify-center gap-3 mb-6">
-            <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-indigo-600 text-white shadow-lg shadow-indigo-600/20">
-              <GraduationCap className="h-7 w-7" />
-            </div>
+            {settings?.logoPath ? (
+              <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white shadow-lg p-1 overflow-hidden">
+                <img src={systemSettingsService.getSystemAssetPublicUrl(settings.logoPath)} alt="Logo" className="w-full h-full object-contain" />
+              </div>
+            ) : (
+              <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-indigo-600 text-white shadow-lg shadow-indigo-600/20">
+                <GraduationCap className="h-7 w-7" />
+              </div>
+            )}
             <div className="text-left">
               <h1 className="text-xl font-bold tracking-tight text-white">
-                Quản Trị Học Đường
+                {settings?.appName || 'School Task & KPI'}
               </h1>
               <p className="text-xs text-indigo-400">
-                Nền tảng Quản lý Hiệu suất
+                {settings?.organizationName || 'Nền tảng Quản lý Hiệu suất'}
               </p>
             </div>
           </div>

@@ -104,7 +104,7 @@ export const MetricList: React.FC<MetricListProps> = ({
 
       const [metricsData, unitsData] = await Promise.all([
         metricService.getMetricDefinitions(filterParams),
-        organizationService.getUnits()
+        organizationService.getUnits(false)
       ]);
 
       // Yêu cầu: Sort (org -> sort_order -> name)

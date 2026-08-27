@@ -7,7 +7,7 @@
  * - Nút hồ sơ người dùng (User Profile)
  * - Nút kiểm tra / cấu hình Supabase
  */
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { 
   Menu, 
   User, 
@@ -18,6 +18,7 @@ import {
   Settings
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { useSystemSettings } from '../../context/SystemSettingsContext';
 import { NavTabId } from '../layout/Sidebar';
 import { UserProfileModal } from '../profile/UserProfileModal';
 
@@ -26,41 +27,6 @@ interface HeaderProps {
   onOpenMobileMenu: () => void;
   onOpenConfigModal: () => void;
 }
-
-const TAB_TITLES: Record<NavTabId, { title: string; subtitle: string }> = {
-  'daily-reports': {
-    title: 'Báo cáo hằng ngày',
-    subtitle: 'Nhập và quản lý báo cáo công việc hằng ngày',
-  },
-  overview: {
-    title: 'Tổng quan hệ thống',
-    subtitle: 'Nền tảng quản lý công việc, KPI & báo cáo học đường',
-  },
-  tasks: {
-    title: 'Quản lý công việc',
-    subtitle: 'Giao việc, theo dõi tiến độ và phân công phòng ban',
-  },
-  metrics: {
-    title: 'Chỉ số đo lường',
-    subtitle: 'Hệ thống chỉ số vận hành và chất lượng đào tạo',
-  },
-  kpis: {
-    title: 'Đánh giá KPI',
-    subtitle: 'Theo dõi mục tiêu và kết quả thực hiện theo chu kỳ',
-  },
-  reports: {
-    title: 'Báo cáo & Thống kê',
-    subtitle: 'Báo cáo tổng hợp tiến độ và hiệu suất trường học',
-  },
-  admin: {
-    title: 'Quản trị hệ thống',
-    subtitle: 'Cấu hình đơn vị, phân quyền cán bộ và bảo mật',
-  },
-  'account/security': {
-    title: 'Bảo mật tài khoản',
-    subtitle: 'Quản lý thông tin đăng nhập và mật khẩu cá nhân',
-  },
-};
 
 const ROLE_BADGES: Record<string, { label: string; style: string }> = {
   admin: { label: 'Admin', style: 'bg-red-100 text-red-800 border-red-200' },
@@ -77,8 +43,44 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenConfigModal,
 }) => {
   const { profile, user, systemRole, signOut, isConfigured } = useAuth();
+  const { settings } = useSystemSettings();
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
+
+  const TAB_TITLES = useMemo<Record<NavTabId, { title: string; subtitle: string }>>(() => ({
+    'daily-reports': {
+      title: 'Báo cáo hằng ngày',
+      subtitle: 'Nhập và quản lý báo cáo công việc hằng ngày',
+    },
+    overview: {
+      title: 'Tổng quan hệ thống',
+      subtitle: `${settings?.appName || 'Nền tảng quản lý'} - ${settings?.organizationName || 'Trường học'}`,
+    },
+    tasks: {
+      title: 'Quản lý công việc',
+      subtitle: 'Giao việc, theo dõi tiến độ và phân công phòng ban',
+    },
+    metrics: {
+      title: 'Chỉ số đo lường',
+      subtitle: 'Hệ thống chỉ số vận hành và chất lượng đào tạo',
+    },
+    kpis: {
+      title: 'Đánh giá KPI',
+      subtitle: 'Theo dõi mục tiêu và kết quả thực hiện theo chu kỳ',
+    },
+    reports: {
+      title: 'Báo cáo & Thống kê',
+      subtitle: 'Báo cáo tổng hợp tiến độ và hiệu suất trường học',
+    },
+    admin: {
+      title: 'Quản trị hệ thống',
+      subtitle: 'Cấu hình đơn vị, phân quyền cán bộ và bảo mật',
+    },
+    'account/security': {
+      title: 'Bảo mật tài khoản',
+      subtitle: 'Quản lý thông tin đăng nhập và mật khẩu cá nhân',
+    },
+  }), [settings]);
 
   const currentTabInfo = TAB_TITLES[activeTab] || TAB_TITLES.overview;
   const roleBadge = systemRole ? (ROLE_BADGES[systemRole] || ROLE_BADGES.staff) : ROLE_BADGES.none;

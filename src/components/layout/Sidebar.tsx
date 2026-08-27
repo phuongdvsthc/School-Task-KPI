@@ -22,6 +22,8 @@ import {
   Building2
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { useSystemSettings } from '../../context/SystemSettingsContext';
+import { systemSettingsService } from '../../services/system-settings.service';
 
 export type NavTabId = 'overview' | 'tasks' | 'metrics' | 'kpis' | 'reports' | 'daily-reports' | 'admin' | 'account/security';
 
@@ -37,6 +39,7 @@ interface MenuItem {
   label: string;
   icon: React.ElementType;
   adminOnly?: boolean;
+  hiddenForStaff?: boolean;
   badge?: string;
 }
 
@@ -55,6 +58,7 @@ const MENU_ITEMS: MenuItem[] = [
     id: 'metrics',
     label: 'Chỉ số',
     icon: BarChart3,
+    hiddenForStaff: true,
   },
   {
     id: 'kpis',
@@ -86,12 +90,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onCloseMobile,
 }) => {
   const { systemRole, isAdmin, primaryUnit, signOut } = useAuth();
+  const { settings } = useSystemSettings();
 
   // Lọc menu theo phân quyền (Chỉ hiển thị Quản trị khi là admin)
   const visibleMenuItems = MENU_ITEMS.filter((item) => {
-    if (item.adminOnly) {
-      return isAdmin;
-    }
+    if (item.adminOnly && !isAdmin) return false;
+    if (item.hiddenForStaff && systemRole === 'staff') return false;
     return true;
   });
 
@@ -114,15 +118,21 @@ export const Sidebar: React.FC<SidebarProps> = ({
       >
         {/* School / System Branding */}
         <div className="flex h-16 items-center gap-3 border-b border-slate-200 px-6">
-          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-indigo-900 text-white shadow-xs">
-            <GraduationCap className="h-6 w-6 text-indigo-200" />
-          </div>
+          {settings?.logoPath ? (
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-white shadow-xs p-1 border border-slate-200 overflow-hidden">
+              <img src={systemSettingsService.getSystemAssetPublicUrl(settings.logoSmallPath || settings.logoPath)} alt="Logo" className="w-full h-full object-contain" />
+            </div>
+          ) : (
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-indigo-900 text-white shadow-xs">
+              <GraduationCap className="h-6 w-6 text-indigo-200" />
+            </div>
+          )}
           <div className="flex flex-col overflow-hidden">
             <span className="truncate text-base font-semibold tracking-tight text-slate-900">
-              Quản Trị Học Đường
+              {settings?.appName || 'School Task & KPI'}
             </span>
             <span className="truncate text-xs text-slate-500 font-medium">
-              Công việc • KPI • Báo cáo
+              {settings?.organizationShortName || 'Quản lý hệ thống'}
             </span>
           </div>
         </div>

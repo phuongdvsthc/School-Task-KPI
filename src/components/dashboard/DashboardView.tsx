@@ -28,6 +28,7 @@ import {
   RefreshCw
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { useSystemSettings } from '../../context/SystemSettingsContext';
 import { organizationService } from '../../services/organizationService';
 import { NavTabId } from '../layout/Sidebar';
 
@@ -77,6 +78,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigateTab }) =
     isRlsBlocked,
     refreshProfile 
   } = useAuth();
+  const { settings } = useSystemSettings();
 
   const [totalUnitsCount, setTotalUnitsCount] = useState<number | null>(null);
   const [unitsQueryError, setUnitsQueryError] = useState<string | null>(null);
@@ -235,8 +237,8 @@ SET
               </div>
               <p className="text-xs text-slate-500 mt-0.5">
                 {profile?.job_title 
-                  ? `${profile.job_title} • Quản Trị Học Đường STHC`
-                  : 'Hệ thống Quản trị Công việc, Chỉ số & KPI Học đường'}
+                  ? `${profile.job_title} • ${settings?.appName || 'School Task & KPI'}`
+                  : settings?.organizationName || 'Nền tảng Quản lý Hiệu suất'}
               </p>
             </div>
           </div>
