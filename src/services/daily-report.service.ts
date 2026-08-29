@@ -54,20 +54,24 @@ class DailyReportService {
     const supabase = getSupabaseClient();
     if (!supabase) throw new Error('Supabase client not initialized');
 
-    // UPSERT based on user_id, organization_unit_id, report_date, source_channel
-    // Wait, since we might not have a unique constraint on these 4 columns, we might need to query first.
-    // Let's query if it exists.
-    const { data: existing, error: findErr } = await this.fetchWithRetry(async () => await 
-      (supabase.from as any)('daily_reports')
-        .select('id')
-        .eq('user_id', payload.user_id)
-        .eq('organization_unit_id', payload.organization_unit_id)
-        .eq('report_date', payload.report_date)
-        .eq('source_channel', payload.source_channel)
-        .maybeSingle()
-    );
-
-    if (findErr) throw new Error('Lỗi kiểm tra báo cáo: ' + findErr.message);
+    let existing: any = null;
+    if (payload.id) {
+       const { data, error } = await this.fetchWithRetry(async () => await (supabase.from as any)('daily_reports').select('id').eq('id', payload.id).maybeSingle());
+       if (error) throw new Error('Lỗi kiểm tra báo cáo: ' + error.message);
+       existing = data;
+    } else {
+       const { data, error } = await this.fetchWithRetry(async () => await 
+         (supabase.from as any)('daily_reports')
+           .select('id')
+           .eq('user_id', payload.user_id)
+           .eq('organization_unit_id', payload.organization_unit_id)
+           .eq('report_date', payload.report_date)
+           .eq('source_channel', payload.source_channel)
+           .maybeSingle()
+       );
+       if (error) throw new Error('Lỗi kiểm tra báo cáo: ' + error.message);
+       existing = data;
+    }
 
     if (existing) {
        const { data, error } = await this.fetchWithRetry(async () => await (supabase.from as any)('daily_reports').update(payload).eq('id', existing.id).select().single());

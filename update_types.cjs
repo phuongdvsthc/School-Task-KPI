@@ -1,9 +1,9 @@
 const fs = require('fs');
-let code = fs.readFileSync('src/types/task.ts', 'utf8');
+let code = fs.readFileSync('src/types/daily-report.ts', 'utf8');
 
 code = code.replace(
-  '  progress: number;',
-  '  progress: number;\n  old_progress?: number;\n  new_progress?: number;'
+  "source_channel: string;", 
+  "source_channel: string;\n  report_source_id?: string | null;\n  report_source?: {\n    name: string;\n  };\n"
 );
 
-fs.writeFileSync('src/types/task.ts', code);
+fs.writeFileSync('src/types/daily-report.ts', code);

@@ -8,18 +8,14 @@ import { MetricDefinition, MetricEntry } from '../../types/metric';
 import { Save, ArrowLeft, AlertCircle } from 'lucide-react';
 import { getSupabaseClient } from '../../lib/supabase';
 
-const CHANNELS = [
-  'EGOV',
-  'Website - yêu cầu tư vấn',
-  'Website - yêu cầu gọi lại',
-  'Khách đến trực tiếp',
-  'Fanpage Facebook',
-  'Zalo OA',
-  'TikTok',
-  'Hotline/Khác'
-];
+
 
 const STATUSES = ['Đi làm', 'Nghỉ phép', 'Công tác', 'Trực sự kiện', 'Làm online'];
+
+interface ReportSource {
+  id: string;
+  name: string;
+}
 
 export const DailyReportFormView: React.FC<{ id?: string }> = ({ id }) => {
   const { user } = useAuth();
@@ -38,7 +34,9 @@ export const DailyReportFormView: React.FC<{ id?: string }> = ({ id }) => {
   // Form data
   const [reportDate, setReportDate] = useState(new Date().toISOString().split('T')[0]);
   const [workStatus, setWorkStatus] = useState(STATUSES[0]);
-  const [sourceChannel, setSourceChannel] = useState(CHANNELS[0]);
+  const [reportSources, setReportSources] = useState<ReportSource[]>([]);
+  const [sourceChannel, setSourceChannel] = useState('');
+  const [reportSourceId, setReportSourceId] = useState('');
   const [customChannel, setCustomChannel] = useState('');
   const [interestGroup, setInterestGroup] = useState('');
   const [relatedTaskId, setRelatedTaskId] = useState('');
@@ -50,7 +48,7 @@ export const DailyReportFormView: React.FC<{ id?: string }> = ({ id }) => {
   const [metricDefs, setMetricDefs] = useState<MetricDefinition[]>([]);
   const [myTasks, setMyTasks] = useState<any[]>([]);
   const [valuesMap, setValuesMap] = useState<Record<string, number>>({});
-  const [ratios, setRatios] = useState<Record<string, string>>({});
+  
 
   useEffect(() => {
     const loadData = async () => {
@@ -78,6 +76,25 @@ export const DailyReportFormView: React.FC<{ id?: string }> = ({ id }) => {
           .order('is_primary', { ascending: false })
         );
         const unitId = orgMembers?.[0]?.organization_unit_id;
+        
+        // Load report sources for this unit
+        try {
+          const { data: sessionData } = await getSupabaseClient()!.auth.getSession();
+          const token = sessionData.session?.access_token;
+          const res = await fetch(`/api/report-sources?organization_unit_id=${unitId}`, {
+            headers: { Authorization: `Bearer ${token}` }
+          });
+          if (res.ok) {
+            const sources = await res.json();
+            setReportSources(sources);
+            if (!isEdit && sources.length > 0) {
+              setReportSourceId(sources[0].id);
+              setSourceChannel(sources[0].name);
+            }
+          }
+        } catch (e) {
+          console.error('Failed to load report sources', e);
+        }
         if (!unitId) throw new Error('Không tìm thấy đơn vị công tác của bạn.');
         setUserUnitId(unitId);
 
@@ -104,11 +121,14 @@ export const DailyReportFormView: React.FC<{ id?: string }> = ({ id }) => {
             setReportDate(report.report_date);
             setWorkStatus(report.work_status);
             
-            if (CHANNELS.includes(report.source_channel)) {
-                setSourceChannel(report.source_channel);
+            const knownSource = reportSources ? reportSources.find((s: any) => s.name === report.source_channel) : null;
+            if (knownSource || !report.source_channel) {
+                setSourceChannel(report.source_channel || '');
             } else {
-                setSourceChannel('Khác');
-                setCustomChannel(report.source_channel);
+                // Try to see if it's an old predefined channel or truly custom
+                // But since we removed CHANNELS, we will just set it directly. 
+                // The dropdown has a fallback for old values.
+                setSourceChannel(report.source_channel);
             }
 
             setInterestGroup(report.interest_group || '');
@@ -123,12 +143,12 @@ export const DailyReportFormView: React.FC<{ id?: string }> = ({ id }) => {
                 vMap[e.metric_definition_id] = typeof e.value === 'number' ? e.value : parseFloat(e.value || '0');
             });
             setValuesMap(vMap);
-            setRatios(dailyReportService.calculateDailyRatios(vMap, defs));
+            
         } else {
             const initialMap: Record<string, number> = {};
             defs.forEach(d => initialMap[d.id] = 0);
             setValuesMap(initialMap);
-            setRatios(dailyReportService.calculateDailyRatios(initialMap, defs));
+            
         }
 
       } catch (err: any) {
@@ -144,7 +164,7 @@ export const DailyReportFormView: React.FC<{ id?: string }> = ({ id }) => {
     const num = val ? parseFloat(val) : 0;
     const newMap = { ...valuesMap, [defId]: num };
     setValuesMap(newMap);
-    setRatios(dailyReportService.calculateDailyRatios(newMap, metricDefs));
+    
   };
 
   const handleSave = async () => {
@@ -156,11 +176,13 @@ export const DailyReportFormView: React.FC<{ id?: string }> = ({ id }) => {
         const channelToSave = sourceChannel === 'Khác' && customChannel ? customChannel : sourceChannel;
 
         const payload: SaveDailyReportPayload = {
+            id: id || undefined,
             report_date: reportDate,
             user_id: user.id,
             organization_unit_id: userUnitId,
             work_status: workStatus,
             source_channel: channelToSave,
+            report_source_id: reportSourceId || null,
             interest_group: interestGroup || null,
             related_task_id: relatedTaskId || null,
             work_summary: workSummary || null,
@@ -209,6 +231,30 @@ export const DailyReportFormView: React.FC<{ id?: string }> = ({ id }) => {
       );
   }
 
+  
+  // Dynamic Ratios calculation
+  const getRatio = (numCode: string, denCode: string, label: string) => {
+    const numDef = metricDefs.find(d => d.code === numCode);
+    const denDef = metricDefs.find(d => d.code === denCode);
+    
+    // Only show if BOTH metrics are active in the current form
+    if (!numDef || !denDef) return null;
+    
+    const numVal = valuesMap[numDef.id] || 0;
+    const denVal = valuesMap[denDef.id] || 0;
+    
+    if (denVal === 0) return { label, value: '0%' };
+    return { label, value: ((numVal / denVal) * 100).toFixed(2) + '%' };
+  };
+
+  const calculatedRatios = [
+    getRatio('CUOC_GOI_NGHE_MAY', 'SO_CUOC_GOI', 'Tỷ lệ nghe máy'),
+    getRatio('KHACH_DA_DEN', 'KHACH_HEN', 'Tỷ lệ đến trường'),
+    getRatio('HO_SO_DANG_KY', 'TONG_LEAD', 'Tỷ lệ hồ sơ/lead'),
+    getRatio('DONG_HOC_PHI', 'HO_SO_DANG_KY', 'Tỷ lệ đóng HP/hồ sơ'),
+    getRatio('DONG_HOC_PHI', 'TONG_LEAD', 'Tỷ lệ chuyển đổi cuối'),
+  ].filter(Boolean) as { label: string, value: string }[];
+
   return (
     <div className="mx-auto max-w-4xl space-y-6 pb-20">
       <div className="flex items-center gap-4">
@@ -244,8 +290,32 @@ export const DailyReportFormView: React.FC<{ id?: string }> = ({ id }) => {
 
                       <div>
                           <label className="mb-1 block text-sm font-medium text-slate-700">Kênh / Nguồn</label>
-                          <select value={sourceChannel} onChange={e => setSourceChannel(e.target.value)} disabled={isEdit} className="w-full rounded-lg border-slate-300 p-2 border focus:border-indigo-500 focus:ring-indigo-500 disabled:bg-slate-100">
-                              {CHANNELS.map(s => <option key={s} value={s}>{s}</option>)}
+                          <select 
+                            value={reportSourceId || sourceChannel} 
+                            onChange={e => {
+                              const val = e.target.value;
+                              if (val === 'Khác') {
+                                setReportSourceId('');
+                                setSourceChannel('Khác');
+                              } else {
+                                const src = reportSources.find(s => s.id === val);
+                                if (src) {
+                                  setReportSourceId(src.id);
+                                  setSourceChannel(src.name);
+                                } else {
+                                  // For legacy edit modes
+                                  setReportSourceId('');
+                                  setSourceChannel(val);
+                                }
+                              }
+                            }} 
+                            disabled={isEdit} 
+                            className="w-full rounded-lg border-slate-300 p-2 border focus:border-indigo-500 focus:ring-indigo-500 disabled:bg-slate-100"
+                          >
+                              {reportSources.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                              {isEdit && sourceChannel && !reportSources.find(s => s.id === reportSourceId || s.name === sourceChannel) && (
+                                <option value={sourceChannel}>{sourceChannel} (Cũ)</option>
+                              )}
                               <option value="Khác">Khác...</option>
                           </select>
                           {sourceChannel === 'Khác' && (
@@ -304,17 +374,19 @@ export const DailyReportFormView: React.FC<{ id?: string }> = ({ id }) => {
                   )}
               </div>
 
+              {calculatedRatios.length > 0 && (
               <div className="rounded-xl border border-slate-200 bg-slate-50 p-6 shadow-xs">
                   <h2 className="text-sm font-semibold text-slate-700 mb-3 uppercase tracking-wider">Tỷ lệ tự động tính</h2>
                   <div className="space-y-2">
-                      {Object.entries(ratios).map(([key, val]) => (
-                          <div key={key} className="flex justify-between text-sm">
-                              <span className="text-slate-600">{key}</span>
-                              <span className="font-semibold text-slate-900">{val}</span>
+                      {calculatedRatios.map((ratio) => (
+                          <div key={ratio.label} className="flex justify-between text-sm">
+                              <span className="text-slate-600">{ratio.label}</span>
+                              <span className="font-semibold text-slate-900">{ratio.value}</span>
                           </div>
                       ))}
                   </div>
               </div>
+              )}
           </div>
       </div>
 
