@@ -1248,6 +1248,209 @@ async function startServer() {
     }
   });
 
+  // --- REPORT SOURCE METRIC ASSIGNMENTS & METRICS API ---
+
+  // Admin GET assignments for a specific metric
+  app.get('/api/admin/metrics/:id/source-assignments', authenticateAdmin, async (req: Request, res: Response) => {
+    try {
+      const supabaseAdmin = res.locals.supabaseAdmin;
+      const metricId = req.params.id;
+
+      const { data, error } = await supabaseAdmin
+        .from('report_source_metric_assignments')
+        .select(`
+          id,
+          report_source_id,
+          metric_definition_id,
+          is_active,
+          is_required,
+          sort_order,
+          report_sources (
+            id,
+            code,
+            name,
+            category,
+            is_active
+          )
+        `)
+        .eq('metric_definition_id', metricId);
+
+      if (error) throw error;
+      const result = (data || []).map((item: any) => ({
+        ...item,
+        report_source: item.report_sources,
+      }));
+      res.json(result);
+    } catch (error: any) {
+      console.error('Error fetching source metric assignments:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Admin POST/PUT save assignments for a specific metric (Service Role upsert/soft update)
+  app.post('/api/admin/metrics/:id/source-assignments', authenticateAdmin, async (req: Request, res: Response) => {
+    try {
+      const supabaseAdmin = res.locals.supabaseAdmin;
+      const adminId = res.locals.adminUser?.id || res.locals.user?.id || (req as any).user?.id;
+      const metricId = req.params.id;
+      const { assignments } = req.body;
+
+      if (!Array.isArray(assignments)) {
+        return res.status(400).json({ error: 'assignments must be an array' });
+      }
+
+      // 1. Fetch existing assignments for this metric
+      const { data: existingRows, error: fetchErr } = await supabaseAdmin
+        .from('report_source_metric_assignments')
+        .select('id, report_source_id, is_active, is_required, sort_order')
+        .eq('metric_definition_id', metricId);
+
+      if (fetchErr) throw fetchErr;
+
+      const existingMap = new Map<string, any>();
+      (existingRows || []).forEach((row: any) => existingMap.set(row.report_source_id, row));
+
+      const inputSourceIds = new Set<string>();
+
+      // 2. Process inputs: Insert or Update
+      for (const item of assignments) {
+        inputSourceIds.add(item.report_source_id);
+        const existing = existingMap.get(item.report_source_id);
+
+        if (existing) {
+          const { error: updateErr } = await supabaseAdmin
+            .from('report_source_metric_assignments')
+            .update({
+              is_active: item.is_active !== undefined ? item.is_active : true,
+              is_required: item.is_required ?? false,
+              sort_order: item.sort_order ?? 0,
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', existing.id);
+
+          if (updateErr) throw updateErr;
+        } else {
+          const { error: insertErr } = await supabaseAdmin
+            .from('report_source_metric_assignments')
+            .insert({
+              metric_definition_id: metricId,
+              report_source_id: item.report_source_id,
+              is_active: item.is_active !== undefined ? item.is_active : true,
+              is_required: item.is_required ?? false,
+              sort_order: item.sort_order ?? 0,
+              created_by: adminId || null,
+            });
+
+          if (insertErr) throw insertErr;
+        }
+      }
+
+      // 3. For existing rows not in input: Soft deactivate
+      for (const [sourceId, existing] of existingMap.entries()) {
+        if (!inputSourceIds.has(sourceId) && existing.is_active) {
+          const { error: deactivateErr } = await supabaseAdmin
+            .from('report_source_metric_assignments')
+            .update({
+              is_active: false,
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', existing.id);
+
+          if (deactivateErr) throw deactivateErr;
+        }
+      }
+
+      res.json({ success: true, count: assignments.length });
+    } catch (error: any) {
+      console.error('Error saving source metric assignments:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // GET all active source metric assignments (for form dependency checking)
+  app.get('/api/admin/metrics/all-assignments', authenticateUser, async (req: Request, res: Response) => {
+    try {
+      const supabaseAdmin = res.locals.supabaseAdmin;
+      const { data, error } = await supabaseAdmin
+        .from('report_source_metric_assignments')
+        .select('id, report_source_id, metric_definition_id, is_active, is_required, sort_order')
+        .eq('is_active', true);
+
+      if (error) throw error;
+      res.json(data || []);
+    } catch (error: any) {
+      console.error('Error fetching all metric assignments:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // GET active metrics for a specific report source (used by staff in daily reports)
+  app.get('/api/report-sources/:sourceId/metrics', authenticateUser, async (req: Request, res: Response) => {
+    try {
+      const supabaseAdmin = res.locals.supabaseAdmin;
+      const sourceId = req.params.sourceId;
+
+      // 1. Get assignments for this source
+      const { data: assignments, error: assignError } = await supabaseAdmin
+        .from('report_source_metric_assignments')
+        .select('id, report_source_id, metric_definition_id, is_active, is_required, sort_order')
+        .eq('report_source_id', sourceId)
+        .eq('is_active', true)
+        .order('sort_order', { ascending: true });
+
+      if (assignError) throw assignError;
+      if (!assignments || assignments.length === 0) {
+        return res.json([]);
+      }
+
+      const metricIds = assignments.map((a: any) => a.metric_definition_id);
+
+      // 2. Query metric definitions
+      const { data: metrics, error: metricsError } = await supabaseAdmin
+        .from('metric_definitions')
+        .select('*')
+        .in('id', metricIds)
+        .eq('is_active', true);
+
+      if (metricsError) throw metricsError;
+      if (!metrics || metrics.length === 0) {
+        return res.json([]);
+      }
+
+      const metricMap = new Map<string, any>();
+      metrics.forEach((m: any) => metricMap.set(m.id, m));
+
+      const assignMap = new Map<string, any>();
+      assignments.forEach((a: any) => assignMap.set(a.metric_definition_id, a));
+
+      const enriched = metrics.map((m: any) => {
+        const assign = assignMap.get(m.id);
+        return {
+          ...m,
+          assignment_is_required: assign?.is_required ?? false,
+          assignment_sort_order: assign?.sort_order ?? 0,
+          numerator_metric: m.numerator_metric_id ? metricMap.get(m.numerator_metric_id) : undefined,
+          denominator_metric: m.denominator_metric_id ? metricMap.get(m.denominator_metric_id) : undefined,
+        };
+      });
+
+      enriched.sort((a: any, b: any) => {
+        if (a.assignment_sort_order !== b.assignment_sort_order) {
+          return a.assignment_sort_order - b.assignment_sort_order;
+        }
+        if ((a.sort_order || 0) !== (b.sort_order || 0)) {
+          return (a.sort_order || 0) - (b.sort_order || 0);
+        }
+        return (a.name || '').localeCompare(b.name || '');
+      });
+
+      res.json(enriched);
+    } catch (error: any) {
+      console.error('Error fetching metrics for source:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // Vite middleware for development
 
 

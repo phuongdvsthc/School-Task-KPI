@@ -8,9 +8,19 @@ export interface DailyReport {
   work_status: WorkStatus | string;
   source_channel: string;
   report_source_id?: string | null;
-  report_source?: {
+  report_sources?: {
+    id: string;
+    code: string;
     name: string;
-  };
+  } | null;
+  report_source?: {
+    id?: string;
+    code?: string;
+    name: string;
+  } | null;
+  user?: {
+    full_name?: string;
+  } | null;
 
   interest_group: string | null;
   related_task_id: string | null;

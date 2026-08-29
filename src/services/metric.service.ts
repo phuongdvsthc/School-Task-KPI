@@ -27,6 +27,17 @@ import { OrganizationUnit, Profile } from '../types/database';
 import { organizationService } from './organizationService';
 import { profileService } from './profileService';
 
+const generateUUID = (): string => {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+};
+
 export const metricService = {
   // =========================================================================
   // METRIC DEFINITIONS (Danh mục chỉ số)
@@ -77,7 +88,7 @@ export const metricService = {
 
       const definitions: MetricDefinition[] = data || [];
 
-      // Join units and profiles
+      // Join units, profiles, and metric map for calculated metrics
       const [units, profiles] = await Promise.all([
         organizationService.getUnits(false).catch(() => []),
         profileService.getAllProfiles().catch(() => []),
@@ -89,10 +100,15 @@ export const metricService = {
       const profileMap = new Map<string, Profile>();
       profiles.forEach((p) => profileMap.set(p.id, p));
 
+      const metricMap = new Map<string, MetricDefinition>();
+      definitions.forEach((d) => metricMap.set(d.id, d));
+
       return definitions.map((item) => ({
         ...item,
         unit_info: item.organization_unit_id ? unitMap.get(item.organization_unit_id) : undefined,
         creator_profile: item.created_by ? profileMap.get(item.created_by) : undefined,
+        numerator_metric: item.numerator_metric_id ? metricMap.get(item.numerator_metric_id) : undefined,
+        denominator_metric: item.denominator_metric_id ? metricMap.get(item.denominator_metric_id) : undefined,
       }));
     } catch (err) {
       console.warn('[Metric Service] Exception querying metric_definitions:', err);
@@ -377,6 +393,7 @@ export const metricService = {
         // INSERT
         const { data, error } = await (supabase.from('metric_entries') as any)
           .insert({
+            id: (payload as any).id || generateUUID(),
             metric_definition_id: payload.metric_definition_id,
             organization_unit_id: cleanUnitId,
             user_id: cleanUserId,
@@ -499,12 +516,365 @@ getMetricEntriesCount(metricId);
   },
 
   // =========================================================================
+  // REPORT SOURCE ASSIGNMENTS & CALCULATED METRICS
+  // =========================================================================
+
+  /**
+   * Lấy danh sách chỉ số được gán cho một Kênh/Nguồn (report_source_id)
+   * Trả về các chỉ số active kèm thông tin assignment (is_required, sort_order)
+   */
+  async getMetricsForReportSource(sourceId: string): Promise<MetricDefinition[]> {
+    const supabase = getSupabaseClient();
+    if (!supabase) throw new Error('Supabase client not initialized');
+
+    // 1. Try Backend API first (Service Role privileges)
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData?.session?.access_token;
+      if (token) {
+        const res = await fetch(`/api/report-sources/${encodeURIComponent(sourceId)}/metrics`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data)) return data;
+        }
+      }
+    } catch (apiErr) {
+      console.warn('[Metric Service] Backend API for source metrics failed, trying direct query:', apiErr);
+    }
+
+    // 2. Direct Supabase query fallback
+    try {
+      const { data: assignments, error: assignError } = await (supabase.from('report_source_metric_assignments') as any)
+        .select('id, report_source_id, metric_definition_id, is_active, is_required, sort_order')
+        .eq('report_source_id', sourceId)
+        .eq('is_active', true)
+        .order('sort_order', { ascending: true });
+
+      if (assignError) throw assignError;
+      if (!assignments || assignments.length === 0) return [];
+
+      const metricIds = assignments.map((a: any) => a.metric_definition_id);
+
+      // Query metric definitions where id IN (...) and is_active = true
+      const { data: metrics, error: metricsError } = await (supabase.from('metric_definitions') as any)
+        .select('*')
+        .in('id', metricIds)
+        .eq('is_active', true);
+
+      if (metricsError) throw metricsError;
+      if (!metrics || metrics.length === 0) return [];
+
+      const metricMap = new Map<string, any>();
+      metrics.forEach((m: any) => metricMap.set(m.id, m));
+
+      const assignMap = new Map<string, any>();
+      assignments.forEach((a: any) => assignMap.set(a.metric_definition_id, a));
+
+      const enriched = metrics.map((m: any) => {
+        const assign = assignMap.get(m.id);
+        return {
+          ...m,
+          assignment_is_required: assign?.is_required ?? false,
+          assignment_sort_order: assign?.sort_order ?? 0,
+          numerator_metric: m.numerator_metric_id ? metricMap.get(m.numerator_metric_id) : undefined,
+          denominator_metric: m.denominator_metric_id ? metricMap.get(m.denominator_metric_id) : undefined,
+        };
+      });
+
+      enriched.sort((a: any, b: any) => {
+        if (a.assignment_sort_order !== b.assignment_sort_order) {
+          return a.assignment_sort_order - b.assignment_sort_order;
+        }
+        if ((a.sort_order || 0) !== (b.sort_order || 0)) {
+          return (a.sort_order || 0) - (b.sort_order || 0);
+        }
+        return (a.name || '').localeCompare(b.name || '');
+      });
+
+      return enriched as MetricDefinition[];
+    } catch (err: any) {
+      console.error('[Metric Service] Error getting metrics for report source:', err);
+      throw new Error('Không thể tải danh sách chỉ số cho Kênh/Nguồn: ' + err.message);
+    }
+  },
+
+  /**
+   * Lấy danh sách phân quyền Kênh/Nguồn đã lưu của 1 chỉ số
+   */
+  async getSourceMetricAssignments(metricId: string): Promise<any[]> {
+    const supabase = getSupabaseClient();
+    if (!supabase) throw new Error('Supabase client not initialized');
+
+    // 1. Try Backend API first (Service Role privileges)
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData?.session?.access_token;
+      if (token) {
+        const res = await fetch(`/api/admin/metrics/${encodeURIComponent(metricId)}/source-assignments`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data)) return data;
+        }
+      }
+    } catch (apiErr) {
+      console.warn('[Metric Service] Backend API for metric assignments failed, trying direct query:', apiErr);
+    }
+
+    // 2. Direct Supabase query fallback
+    try {
+      const { data, error } = await (supabase.from('report_source_metric_assignments') as any)
+        .select(`
+          id,
+          report_source_id,
+          metric_definition_id,
+          is_active,
+          is_required,
+          sort_order,
+          report_sources (
+            id,
+            code,
+            name,
+            category,
+            is_active
+          )
+        `)
+        .eq('metric_definition_id', metricId);
+
+      if (error) throw error;
+      return (data || []).map((item: any) => ({
+        ...item,
+        report_source: item.report_sources,
+      }));
+    } catch (err: any) {
+      console.error('[Metric Service] Error getting source metric assignments:', err);
+      return [];
+    }
+  },
+
+  /**
+   * Lưu danh sách phân quyền Kênh/Nguồn cho 1 chỉ số (Soft update/upsert, không xóa vật lý)
+   */
+  async saveSourceMetricAssignments(
+    metricId: string,
+    assignments: any[],
+    userId?: string
+  ): Promise<void> {
+    const supabase = getSupabaseClient();
+    if (!supabase) throw new Error('Supabase client not initialized');
+
+    // 1. Try Backend API first (Runs with Service Role to bypass client-side table RLS/permission restrictions)
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData?.session?.access_token;
+      if (token) {
+        const res = await fetch(`/api/admin/metrics/${encodeURIComponent(metricId)}/source-assignments`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ assignments }),
+        });
+
+        if (res.ok) {
+          return;
+        }
+
+        const errData = await res.json().catch(() => null);
+        if (errData?.error && !errData.error.includes('404')) {
+          throw new Error(errData.error);
+        }
+      }
+    } catch (apiErr: any) {
+      console.warn('[Metric Service] Backend API for saving metric assignments returned error, attempting direct query:', apiErr);
+      if (apiErr.message && !apiErr.message.includes('fetch')) {
+        throw apiErr;
+      }
+    }
+
+    // 2. Direct Supabase fallback
+    try {
+      // Fetch existing assignments for this metric
+      const { data: existingRows, error: fetchErr } = await (supabase.from('report_source_metric_assignments') as any)
+        .select('id, report_source_id, is_active, is_required, sort_order')
+        .eq('metric_definition_id', metricId);
+
+      if (fetchErr) throw fetchErr;
+
+      const existingMap = new Map<string, any>();
+      (existingRows || []).forEach((row: any) => existingMap.set(row.report_source_id, row));
+
+      const inputSourceIds = new Set<string>();
+
+      // Process inputs: Insert or Update
+      for (const item of assignments) {
+        inputSourceIds.add(item.report_source_id);
+        const existing = existingMap.get(item.report_source_id);
+
+        if (existing) {
+          // Update if changed
+          const { error: updateErr } = await (supabase.from('report_source_metric_assignments') as any)
+            .update({
+              is_active: item.is_active,
+              is_required: item.is_required ?? false,
+              sort_order: item.sort_order ?? 0,
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', existing.id);
+
+          if (updateErr) throw updateErr;
+        } else {
+          // Insert new record
+          const { error: insertErr } = await (supabase.from('report_source_metric_assignments') as any)
+            .insert({
+              metric_definition_id: metricId,
+              report_source_id: item.report_source_id,
+              is_active: item.is_active,
+              is_required: item.is_required ?? false,
+              sort_order: item.sort_order ?? 0,
+              created_by: userId || null,
+            });
+
+          if (insertErr) throw insertErr;
+        }
+      }
+
+      // For any existing row not present in assignments: Soft update is_active = false
+      for (const [sourceId, existing] of existingMap.entries()) {
+        if (!inputSourceIds.has(sourceId) && existing.is_active) {
+          const { error: deactivateErr } = await (supabase.from('report_source_metric_assignments') as any)
+            .update({
+              is_active: false,
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', existing.id);
+
+          if (deactivateErr) throw deactivateErr;
+        }
+      }
+    } catch (err: any) {
+      console.error('[Metric Service] Error saving source metric assignments:', err);
+      throw new Error('Lỗi khi lưu phân quyền Kênh/Nguồn cho chỉ số: ' + err.message);
+    }
+  },
+
+  /**
+   * Validate dependency của Calculated Metric (Tỷ lệ):
+   * Mỗi Kênh/Nguồn được chọn phải được gán cả Tử số và Mẫu số
+   */
+  async validateCalculatedMetricDependencies(
+    numeratorMetricId: string,
+    denominatorMetricId: string,
+    activeSourceIds: string[]
+  ): Promise<void> {
+    if (!activeSourceIds || activeSourceIds.length === 0) return;
+    const supabase = getSupabaseClient();
+    if (!supabase) throw new Error('Supabase client not initialized');
+
+    let assignments: any[] = [];
+
+    // 1. Try API first
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData?.session?.access_token;
+      if (token) {
+        const res = await fetch('/api/admin/metrics/all-assignments', {
+          headers: { Authorization: `Bearer ${token}` }
+        }).catch(() => null);
+        if (res && res.ok) {
+          const all = await res.json();
+          assignments = (all || []).filter(
+            (a: any) =>
+              activeSourceIds.includes(a.report_source_id) &&
+              (a.metric_definition_id === numeratorMetricId || a.metric_definition_id === denominatorMetricId) &&
+              a.is_active
+          );
+        }
+      }
+    } catch {
+      // Ignored
+    }
+
+    // 2. Direct Supabase query fallback if assignments empty
+    if (!assignments || assignments.length === 0) {
+      try {
+        const { data, error } = await (supabase.from('report_source_metric_assignments') as any)
+          .select('report_source_id, metric_definition_id, is_active, report_sources(id, name)')
+          .in('report_source_id', activeSourceIds)
+          .in('metric_definition_id', [numeratorMetricId, denominatorMetricId])
+          .eq('is_active', true);
+
+        if (!error && data) {
+          assignments = data;
+        }
+      } catch {
+        // Ignored
+      }
+    }
+
+    // Also get names for clear error reporting
+    const [numMetric, denMetric, sources] = await Promise.all([
+      this.getMetricDefinitionById(numeratorMetricId).catch(() => null),
+      this.getMetricDefinitionById(denominatorMetricId).catch(() => null),
+      this.getAllReportSources().catch(() => []),
+    ]);
+
+    const numName = numMetric?.name || 'Tử số';
+    const denName = denMetric?.name || 'Mẫu số';
+
+    const sourceNameMap = new Map<string, string>();
+    sources.forEach((s: any) => sourceNameMap.set(s.id, s.name));
+
+    // Map sourceId -> set of active assigned metric IDs
+    const sourceAssignedMetrics = new Map<string, Set<string>>();
+
+    (assignments || []).forEach((row: any) => {
+      if (!sourceAssignedMetrics.has(row.report_source_id)) {
+        sourceAssignedMetrics.set(row.report_source_id, new Set());
+      }
+      sourceAssignedMetrics.get(row.report_source_id)!.add(row.metric_definition_id);
+      if (row.report_sources?.name) {
+        sourceNameMap.set(row.report_source_id, row.report_sources.name);
+      }
+    });
+
+    const missingSources: string[] = [];
+
+    for (const srcId of activeSourceIds) {
+      const assigned = sourceAssignedMetrics.get(srcId) || new Set();
+      const hasNum = assigned.has(numeratorMetricId);
+      const hasDen = assigned.has(denominatorMetricId);
+
+      if (!hasNum || !hasDen) {
+        let srcName = sourceNameMap.get(srcId) || srcId;
+        const missingParts: string[] = [];
+        if (!hasNum) missingParts.push(`Tử số "${numName}"`);
+        if (!hasDen) missingParts.push(`Mẫu số "${denName}"`);
+
+        missingSources.push(`Kênh "${srcName}" (thiếu: ${missingParts.join(' và ')})`);
+      }
+    }
+
+    if (missingSources.length > 0) {
+      throw new Error(
+        `Không thể gán chỉ số tính toán tỷ lệ vì các Kênh sau chưa được gán đủ chỉ số thành phần:\n- ${missingSources.join('\n- ')}\nVui lòng gán các chỉ số thành phần vào Kênh tương ứng trước.`
+      );
+    }
+  },
+
+  // =========================================================================
   // INTERNAL ENRICHMENT & HELPER METHODS
   // =========================================================================
 
   async _enrichMetricWithDetails(metric: MetricDefinition): Promise<MetricDefinition> {
     let unit_info = metric.unit_info;
     let creator_profile = metric.creator_profile;
+    let numerator_metric = metric.numerator_metric;
+    let denominator_metric = metric.denominator_metric;
 
     if (metric.organization_unit_id && !unit_info) {
       try {
@@ -522,58 +892,173 @@ getMetricEntriesCount(metricId);
       }
     }
 
-    const entries_count = await this.
-getMetricEntriesCount(metric.id).catch(() => 0);
+    if (metric.numerator_metric_id && !numerator_metric) {
+      try {
+        numerator_metric = await this.getMetricDefinitionById(metric.numerator_metric_id);
+      } catch {
+        // Ignored
+      }
+    }
+
+    if (metric.denominator_metric_id && !denominator_metric) {
+      try {
+        denominator_metric = await this.getMetricDefinitionById(metric.denominator_metric_id);
+      } catch {
+        // Ignored
+      }
+    }
+
+    const entries_count = await this.getMetricEntriesCount(metric.id).catch(() => 0);
 
     return {
       ...metric,
       unit_info,
       creator_profile,
+      numerator_metric,
+      denominator_metric,
       entries_count,
     };
   },
 
-  
   async createMetricDefinition(
-    payload: any,
+    payload: CreateMetricDefinitionPayload,
     userId?: string
   ): Promise<MetricDefinition> {
     const supabase = getSupabaseClient();
     if (!supabase) throw new Error('Supabase client not initialized');
 
+    const entry_mode = payload.entry_mode || 'manual';
+    const isCalculated = entry_mode === 'calculated';
+
+    if (isCalculated) {
+      if (!payload.numerator_metric_id || !payload.denominator_metric_id) {
+        throw new Error('Chỉ số tự động tính toán (Tỷ lệ) bắt buộc phải chọn cả Tử số và Mẫu số.');
+      }
+      if (payload.numerator_metric_id === payload.denominator_metric_id) {
+        throw new Error('Tử số và Mẫu số không được trùng nhau.');
+      }
+
+      // Check dependencies on active sources
+      const activeSourceIds = (payload.source_assignments || [])
+        .filter(a => a.is_active)
+        .map(a => a.report_source_id);
+
+      await this.validateCalculatedMetricDependencies(
+        payload.numerator_metric_id,
+        payload.denominator_metric_id,
+        activeSourceIds
+      );
+    }
+
+    const { source_assignments, ...metricData } = payload;
+
+    const formattedPayload: any = {
+      ...metricData,
+      id: (metricData as any).id || generateUUID(),
+      organization_unit_id: metricData.organization_unit_id || null,
+      entry_mode,
+      calculation_type: isCalculated ? (payload.calculation_type || 'ratio') : null,
+      numerator_metric_id: isCalculated ? payload.numerator_metric_id : null,
+      denominator_metric_id: isCalculated ? payload.denominator_metric_id : null,
+      data_type: isCalculated ? 'percentage' : metricData.data_type,
+      unit: isCalculated ? '%' : metricData.unit,
+      allow_manual_entry: isCalculated ? false : (metricData.allow_manual_entry ?? true),
+      created_by: userId || null,
+    };
+
     const { data, error } = await (supabase.from('metric_definitions') as any)
-      .insert([{
-        ...payload,
-        created_by: userId,
-      }])
+      .insert([formattedPayload])
       .select()
       .single();
 
     if (error) {
-        if (error.code === '23505') throw new Error('Mã chỉ số đã tồn tại. Vui lòng chọn mã khác.');
-        throw error;
+      if (error.code === '23505') throw new Error('Mã chỉ số đã tồn tại. Vui lòng chọn mã khác.');
+      throw error;
     }
-    return data as MetricDefinition;
+
+    const createdMetric = data as MetricDefinition;
+
+    // Save source assignments if provided
+    if (source_assignments && Array.isArray(source_assignments)) {
+      await this.saveSourceMetricAssignments(createdMetric.id, source_assignments, userId);
+    }
+
+    return this._enrichMetricWithDetails(createdMetric);
   },
 
   async updateMetricDefinition(
     id: string,
-    updates: any
+    updates: UpdateMetricDefinitionPayload,
+    userId?: string
   ): Promise<MetricDefinition> {
     const supabase = getSupabaseClient();
     if (!supabase) throw new Error('Supabase client not initialized');
 
+    const entry_mode = updates.entry_mode || 'manual';
+    const isCalculated = entry_mode === 'calculated';
+
+    if (isCalculated) {
+      if (!updates.numerator_metric_id || !updates.denominator_metric_id) {
+        throw new Error('Chỉ số tự động tính toán (Tỷ lệ) bắt buộc phải chọn cả Tử số và Mẫu số.');
+      }
+      if (updates.numerator_metric_id === updates.denominator_metric_id) {
+        throw new Error('Tử số và Mẫu số không được trùng nhau.');
+      }
+      if (updates.numerator_metric_id === id || updates.denominator_metric_id === id) {
+        throw new Error('Chỉ số tự động tính không thể chọn chính nó làm thành phần.');
+      }
+
+      // Check dependencies on active sources
+      const activeSourceIds = (updates.source_assignments || [])
+        .filter(a => a.is_active)
+        .map(a => a.report_source_id);
+
+      await this.validateCalculatedMetricDependencies(
+        updates.numerator_metric_id,
+        updates.denominator_metric_id,
+        activeSourceIds
+      );
+    }
+
+    const { source_assignments, ...metricData } = updates;
+
+    const formattedUpdates: any = {
+      ...metricData,
+      organization_unit_id: metricData.organization_unit_id !== undefined ? (metricData.organization_unit_id || null) : undefined,
+      entry_mode,
+      calculation_type: isCalculated ? (updates.calculation_type || 'ratio') : null,
+      numerator_metric_id: isCalculated ? updates.numerator_metric_id : null,
+      denominator_metric_id: isCalculated ? updates.denominator_metric_id : null,
+      data_type: isCalculated ? 'percentage' : metricData.data_type,
+      unit: isCalculated ? '%' : metricData.unit,
+      allow_manual_entry: isCalculated ? false : metricData.allow_manual_entry,
+      updated_at: new Date().toISOString(),
+    };
+
+    // Remove undefined keys
+    Object.keys(formattedUpdates).forEach(
+      key => formattedUpdates[key] === undefined && delete formattedUpdates[key]
+    );
+
     const { data, error } = await (supabase.from('metric_definitions') as any)
-      .update(updates)
+      .update(formattedUpdates)
       .eq('id', id)
       .select()
       .single();
 
     if (error) {
-        if (error.code === '23505') throw new Error('Mã chỉ số đã tồn tại. Vui lòng chọn mã khác.');
-        throw error;
+      if (error.code === '23505') throw new Error('Mã chỉ số đã tồn tại. Vui lòng chọn mã khác.');
+      throw error;
     }
-    return data as MetricDefinition;
+
+    const updatedMetric = data as MetricDefinition;
+
+    // Save source assignments if provided
+    if (source_assignments && Array.isArray(source_assignments)) {
+      await this.saveSourceMetricAssignments(id, source_assignments, userId);
+    }
+
+    return this._enrichMetricWithDetails(updatedMetric);
   },
 
   async toggleMetricDefinition(id: string, is_active?: boolean): Promise<void> {
@@ -590,6 +1075,22 @@ getMetricEntriesCount(metric.id).catch(() => 0);
       .eq('id', id);
 
     if (error) throw error;
+  },
+
+  async getAllReportSources(): Promise<any[]> {
+    const supabase = getSupabaseClient();
+    if (!supabase) return [];
+    try {
+      const { data, error } = await (supabase.from('report_sources') as any)
+        .select('*')
+        .order('sort_order', { ascending: true })
+        .order('name', { ascending: true });
+      if (error) throw error;
+      return data || [];
+    } catch (err) {
+      console.warn('Error fetching all report sources:', err);
+      return [];
+    }
   },
 
   async _enrichMetricEntryWithDetails(entry: MetricEntry): Promise<MetricEntry> {
@@ -640,6 +1141,15 @@ export const getMetricDefinitionById = (id: string) =>
 export const getActiveMetricsForEntry = (userId: string, unitId?: string | null) =>
   metricService.getActiveMetricsForEntry(userId, unitId);
 
+export const getMetricsForReportSource = (sourceId: string) =>
+  metricService.getMetricsForReportSource(sourceId);
+
+export const getSourceMetricAssignments = (metricId: string) =>
+  metricService.getSourceMetricAssignments(metricId);
+
+export const saveSourceMetricAssignments = (metricId: string, assignments: any[], userId?: string) =>
+  metricService.saveSourceMetricAssignments(metricId, assignments, userId);
+
 export const getMetricEntries = (filters?: MetricEntriesFilterOptions) =>
   metricService.getMetricEntries(filters);
 
@@ -659,8 +1169,8 @@ export const saveMetricEntries = (entries: SaveMetricEntryPayload[], currentUser
 export const createMetricDefinition = (payload: CreateMetricDefinitionPayload, userId?: string) =>
   metricService.createMetricDefinition(payload, userId);
 
-export const updateMetricDefinition = (id: string, updates: UpdateMetricDefinitionPayload) =>
-  metricService.updateMetricDefinition(id, updates);
+export const updateMetricDefinition = (id: string, updates: UpdateMetricDefinitionPayload, userId?: string) =>
+  metricService.updateMetricDefinition(id, updates, userId);
 
 export const metricHasEntries = (id: string) => metricService.metricHasEntries(id);
 export const calculateMetricPeriod = (f: string, d: Date) => metricService.calculateMetricPeriod(f, d);

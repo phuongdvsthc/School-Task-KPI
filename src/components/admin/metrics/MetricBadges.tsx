@@ -23,11 +23,36 @@ export const MetricCategoryBadge: React.FC<{ category: string }> = ({ category }
   );
 };
 
-export const MetricDataTypeBadge: React.FC<{ dataType: string }> = ({ dataType }) => {
+export const MetricDataTypeBadge: React.FC<{ dataType: string; unit?: string | null }> = ({ dataType, unit }) => {
   const label = METRIC_DATA_TYPE_LABELS[dataType] || dataType;
   return (
-    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-700 border border-slate-200">
-      {label}
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-700 border border-slate-200">
+      <span>{label}</span>
+      {unit && <span className="text-slate-500 font-normal">({unit})</span>}
+    </span>
+  );
+};
+
+export const MetricEntryModeBadge: React.FC<{ 
+  entryMode?: string | null; 
+  calculationType?: string | null;
+  numeratorCode?: string | null;
+  denominatorCode?: string | null;
+}> = ({ entryMode, calculationType, numeratorCode, denominatorCode }) => {
+  if (entryMode === 'calculated') {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold bg-purple-50 text-purple-700 border border-purple-200">
+        <span>Tự động tính tỷ lệ</span>
+        {numeratorCode && denominatorCode && (
+          <span className="font-mono font-normal opacity-80">({numeratorCode}/{denominatorCode})</span>
+        )}
+      </span>
+    );
+  }
+
+  return (
+    <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-medium bg-slate-100 text-slate-600 border border-slate-200">
+      Thủ công
     </span>
   );
 };

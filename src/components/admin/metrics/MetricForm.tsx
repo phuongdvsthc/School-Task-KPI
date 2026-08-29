@@ -1,8 +1,12 @@
 /**
  * MetricForm Component
  * Xử lý biểu mẫu Tạo mới (/admin/metrics/new) và Chỉnh sửa (/admin/metrics/[id]/edit)
+ * Hỗ trợ:
+ * - entry_mode: manual | calculated
+ * - calculation_type: ratio (Tử số / Mẫu số)
+ * - report_source_metric_assignments (Phân quyền áp dụng theo Kênh/Nguồn)
  */
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { 
   CreateMetricDefinitionPayload, 
   UpdateMetricDefinitionPayload,
@@ -13,7 +17,10 @@ import {
   MetricTargetDirection,
   METRIC_CATEGORY_LABELS,
   MeasurementScope,
-  MetricSourceType
+  MetricSourceType,
+  MetricEntryMode,
+  MetricCalculationType,
+  MetricDefinition
 } from '../../../types/metric';
 import { OrganizationUnit } from '../../../types/database';
 import { metricService, metricHasEntries } from '../../../services/metricService';
@@ -24,16 +31,16 @@ import {
   Save, 
   Loader2, 
   Building2, 
-  HelpCircle, 
   AlertCircle, 
-  CheckCircle2, 
   Sparkles, 
-  Layers, 
   Sliders, 
-  Compass, 
-  Calendar,
-  Hash,
-  Database
+  Database,
+  Calculator,
+  Radio,
+  Share2,
+  Check,
+  AlertTriangle,
+  HelpCircle
 } from 'lucide-react';
 
 interface MetricFormProps {
@@ -43,6 +50,18 @@ interface MetricFormProps {
   onSuccess: (metricId?: string) => void;
 }
 
+interface SourceAssignmentRow {
+  report_source_id: string;
+  source_code: string;
+  source_name: string;
+  source_category?: string;
+  source_is_active: boolean; // Source system status
+  is_assigned: boolean;      // Whether assigned in this form
+  is_active: boolean;        // Assignment status
+  is_required: boolean;      // Required input in daily report
+  sort_order: number;
+}
+
 const MEASUREMENT_SCOPE_LABELS: Record<string, string> = {
   individual: 'Cá nhân',
   unit: 'Đơn vị',
@@ -50,7 +69,7 @@ const MEASUREMENT_SCOPE_LABELS: Record<string, string> = {
 };
 
 const DATA_TYPE_LABELS: Record<string, string> = {
-  number: 'Số',
+  number: 'Số lượng',
   percentage: 'Tỷ lệ %',
   currency: 'Tiền tệ',
   time_hours: 'Thời lượng'
@@ -96,7 +115,13 @@ export const MetricForm: React.FC<MetricFormProps> = ({
   const { user } = useAuth();
 
   const [units, setUnits] = useState<OrganizationUnit[]>([]);
-  const [isLoading, setIsLoading] = useState<boolean>(mode === 'edit');
+  const [allMetrics, setAllMetrics] = useState<MetricDefinition[]>([]);
+  const [allSources, setAllSources] = useState<any[]>([]);
+  const [sourceAssignments, setSourceAssignments] = useState<SourceAssignmentRow[]>([]);
+  // Map of sourceId -> Set of metric_definition_ids actively assigned to it (for validation)
+  const [sourceActiveMetricMap, setSourceActiveMetricMap] = useState<Map<string, Set<string>>>(new Map());
+
+  const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [hasEntries, setHasEntries] = useState<boolean>(false);
@@ -106,13 +131,19 @@ export const MetricForm: React.FC<MetricFormProps> = ({
   const [code, setCode] = useState<string>('');
   const [organizationUnitId, setOrganizationUnitId] = useState<string>('');
   const [description, setDescription] = useState<string>('');
-  const [category, setCategory] = useState<MetricCategory>('teaching');
+  const [category, setCategory] = useState<MetricCategory>('enrollment');
   
+  // v0.3.4d Entry Mode & Calculation
+  const [entryMode, setEntryMode] = useState<MetricEntryMode>('manual');
+  const [calculationType, setCalculationType] = useState<MetricCalculationType>('ratio');
+  const [numeratorMetricId, setNumeratorMetricId] = useState<string>('');
+  const [denominatorMetricId, setDenominatorMetricId] = useState<string>('');
+
   const [measurementScope, setMeasurementScope] = useState<MeasurementScope>('individual');
   const [dataType, setDataType] = useState<MetricDataType>('number');
-  const [unit, setUnit] = useState<string>('');
+  const [unit, setUnit] = useState<string>('lượt');
   const [aggregationType, setAggregationType] = useState<MetricAggregationType>('sum');
-  const [frequency, setFrequency] = useState<MetricFrequency | 'manual'>('monthly');
+  const [frequency, setFrequency] = useState<MetricFrequency | 'manual'>('daily');
   const [targetDirection, setTargetDirection] = useState<MetricTargetDirection | 'higher_better' | 'lower_better' | 'neutral'>('higher_better');
   const [sourceType, setSourceType] = useState<MetricSourceType>('manual');
   
@@ -124,7 +155,7 @@ export const MetricForm: React.FC<MetricFormProps> = ({
   const handleAutoGenerateCode = () => {
     if (!name.trim()) return;
     const cleanStr = name.trim().toUpperCase()
-      .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // remove accents
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
       .replace(/Đ/g, "D")
       .replace(/[^A-Z0-9 ]/g, "")
       .replace(/\s+/g, "_");
@@ -134,31 +165,103 @@ export const MetricForm: React.FC<MetricFormProps> = ({
   useEffect(() => {
     const fetchDependencies = async () => {
       try {
-        const orgs = await organizationService.getUnits();
+        setIsLoading(true);
+        // Load units, all metrics, all sources, and all assignments for dependency checking
+        const [orgs, metricsList, sourcesList] = await Promise.all([
+          organizationService.getUnits().catch(() => []),
+          metricService.getMetricDefinitions().catch(() => []),
+          metricService.getAllReportSources().catch(() => []),
+        ]);
+
         setUnits(orgs);
-        
+        setAllMetrics(metricsList);
+        setAllSources(sourcesList);
+
+        // Fetch all active assignments across all sources for dependency checking
+        try {
+          const supabase = (await import('../../../lib/supabase')).getSupabaseClient();
+          let allAssigns: any[] = [];
+          if (supabase) {
+            const { data: sessionData } = await supabase.auth.getSession();
+            const token = sessionData?.session?.access_token;
+            if (token) {
+              const res = await fetch('/api/admin/metrics/all-assignments', {
+                headers: { Authorization: `Bearer ${token}` }
+              }).catch(() => null);
+              if (res && res.ok) {
+                allAssigns = await res.json();
+              }
+            }
+
+            if (!allAssigns || allAssigns.length === 0) {
+              const { data } = await (supabase.from('report_source_metric_assignments') as any)
+                .select('report_source_id, metric_definition_id, is_active')
+                .eq('is_active', true);
+              allAssigns = data || [];
+            }
+            
+            const srcMap = new Map<string, Set<string>>();
+            (allAssigns || []).forEach((a: any) => {
+              if (!srcMap.has(a.report_source_id)) {
+                srcMap.set(a.report_source_id, new Set());
+              }
+              srcMap.get(a.report_source_id)!.add(a.metric_definition_id);
+            });
+            setSourceActiveMetricMap(srcMap);
+          }
+        } catch (e) {
+          console.warn('Could not build source-metric mapping for client-side validation:', e);
+        }
+
         if (mode === 'edit' && metricId) {
-          const metric = await metricService.getMetricDefinitionById(metricId);
+          const [metric, savedAssignments] = await Promise.all([
+            metricService.getMetricDefinitionById(metricId),
+            metricService.getSourceMetricAssignments(metricId).catch(() => []),
+          ]);
+
           if (metric) {
             setName(metric.name);
             setCode(metric.code);
             setOrganizationUnitId(metric.organization_unit_id || '');
             setDescription(metric.description || '');
-            setCategory(metric.category as MetricCategory);
+            setCategory((metric.category as MetricCategory) || 'enrollment');
             
-            // Map legacy or existing values to new fields
-            setMeasurementScope((metric as any).measurement_scope || 'individual');
-            setSourceType((metric as any).source_type || 'manual');
-            
-            setDataType(metric.data_type as MetricDataType);
+            setEntryMode(metric.entry_mode || 'manual');
+            setCalculationType(metric.calculation_type || 'ratio');
+            setNumeratorMetricId(metric.numerator_metric_id || '');
+            setDenominatorMetricId(metric.denominator_metric_id || '');
+
+            setMeasurementScope((metric.measurement_scope as MeasurementScope) || 'individual');
+            setSourceType((metric.source_type as MetricSourceType) || 'manual');
+            setDataType((metric.data_type as MetricDataType) || 'number');
             setUnit(metric.unit || '');
-            setAggregationType(metric.aggregation_type as MetricAggregationType);
-            setFrequency(metric.frequency as any);
-            setTargetDirection(metric.target_direction as any);
+            setAggregationType((metric.aggregation_type as MetricAggregationType) || 'sum');
+            setFrequency((metric.frequency as any) || 'daily');
+            setTargetDirection((metric.target_direction as any) || 'higher_better');
             setAllowManualEntry(metric.allow_manual_entry ?? true);
             setSortOrder(metric.sort_order || 0);
             setIsActive(metric.is_active ?? true);
-            
+
+            // Build source assignments list
+            const savedMap = new Map<string, any>();
+            savedAssignments.forEach((sa: any) => savedMap.set(sa.report_source_id, sa));
+
+            const rows: SourceAssignmentRow[] = sourcesList.map((src: any) => {
+              const saved = savedMap.get(src.id);
+              return {
+                report_source_id: src.id,
+                source_code: src.code,
+                source_name: src.name,
+                source_category: src.category,
+                source_is_active: src.is_active,
+                is_assigned: saved ? (saved.is_active ?? true) : false,
+                is_active: saved ? (saved.is_active ?? true) : true,
+                is_required: saved ? (saved.is_required ?? false) : false,
+                sort_order: saved ? (saved.sort_order ?? src.sort_order ?? 0) : (src.sort_order ?? 0),
+              };
+            });
+            setSourceAssignments(rows);
+
             // Check if metric has entries
             const entriesExist = await metricHasEntries(metricId);
             setHasEntries(entriesExist);
@@ -166,10 +269,19 @@ export const MetricForm: React.FC<MetricFormProps> = ({
             setErrorMessage('Không tìm thấy thông tin chỉ số.');
           }
         } else {
-          // Pre-select first unit if available
-          if (orgs.length > 0) {
-            setOrganizationUnitId(orgs[0].id);
-          }
+          // Create mode defaults
+          const rows: SourceAssignmentRow[] = sourcesList.map((src: any) => ({
+            report_source_id: src.id,
+            source_code: src.code,
+            source_name: src.name,
+            source_category: src.category,
+            source_is_active: src.is_active,
+            is_assigned: false,
+            is_active: true,
+            is_required: false,
+            sort_order: src.sort_order || 0,
+          }));
+          setSourceAssignments(rows);
         }
       } catch (err: any) {
         setErrorMessage('Lỗi khi tải dữ liệu: ' + err.message);
@@ -180,12 +292,81 @@ export const MetricForm: React.FC<MetricFormProps> = ({
     fetchDependencies();
   }, [mode, metricId]);
 
-  // Handle source type change side effect
+  // When switching entry mode
   useEffect(() => {
-    if (sourceType !== 'manual') {
+    if (entryMode === 'calculated') {
+      setDataType('percentage');
+      setUnit('%');
       setAllowManualEntry(false);
+      setSourceType('system');
+    } else {
+      if (sourceType === 'system') {
+        setSourceType('manual');
+        setAllowManualEntry(true);
+      }
     }
-  }, [sourceType]);
+  }, [entryMode]);
+
+  // Filter available metrics for numerator / denominator
+  const availableManualMetrics = useMemo(() => {
+    return allMetrics.filter(m => 
+      m.id !== metricId && // Cannot select itself
+      (m.entry_mode === 'manual' || !m.entry_mode) && // Must be manual
+      m.is_active !== false // Must be active
+    );
+  }, [allMetrics, metricId]);
+
+  // Handle toggle source assignment
+  const handleToggleSourceAssign = (sourceId: string) => {
+    setSourceAssignments(prev => prev.map(row => {
+      if (row.report_source_id === sourceId) {
+        const nextAssigned = !row.is_assigned;
+        return {
+          ...row,
+          is_assigned: nextAssigned,
+          is_active: nextAssigned,
+        };
+      }
+      return row;
+    }));
+  };
+
+  const handleUpdateAssignmentField = (sourceId: string, field: 'is_required' | 'sort_order' | 'is_active', val: any) => {
+    setSourceAssignments(prev => prev.map(row => {
+      if (row.report_source_id === sourceId) {
+        return { ...row, [field]: val };
+      }
+      return row;
+    }));
+  };
+
+  // Check dependency warnings for calculated metrics
+  const calculatedDependencyWarnings = useMemo(() => {
+    if (entryMode !== 'calculated' || !numeratorMetricId || !denominatorMetricId) {
+      return [];
+    }
+
+    const warnings: { sourceName: string; missing: string }[] = [];
+    const assignedSources = sourceAssignments.filter(s => s.is_assigned && s.is_active);
+
+    for (const src of assignedSources) {
+      const activeIds = sourceActiveMetricMap.get(src.report_source_id) || new Set();
+      const hasNum = activeIds.has(numeratorMetricId);
+      const hasDen = activeIds.has(denominatorMetricId);
+
+      if (!hasNum || !hasDen) {
+        const missingParts: string[] = [];
+        if (!hasNum) missingParts.push('Tử số');
+        if (!hasDen) missingParts.push('Mẫu số');
+        warnings.push({
+          sourceName: src.source_name,
+          missing: missingParts.join(' và ')
+        });
+      }
+    }
+
+    return warnings;
+  }, [entryMode, numeratorMetricId, denominatorMetricId, sourceAssignments, sourceActiveMetricMap]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -194,54 +375,89 @@ export const MetricForm: React.FC<MetricFormProps> = ({
     // Validation
     if (!name.trim()) return setErrorMessage('Vui lòng nhập tên chỉ số.');
     if (!code.trim()) return setErrorMessage('Vui lòng nhập mã chỉ số.');
-    if (!organizationUnitId) return setErrorMessage('Vui lòng chọn Đơn vị quản lý.');
-    if (!measurementScope) return setErrorMessage('Vui lòng chọn Phạm vi đo lường.');
-    if (!dataType) return setErrorMessage('Vui lòng chọn Loại dữ liệu.');
-    if (!aggregationType) return setErrorMessage('Vui lòng chọn Phương pháp tổng hợp.');
-    if (!frequency) return setErrorMessage('Vui lòng chọn Tần suất đo lường.');
-    if (!targetDirection) return setErrorMessage('Vui lòng chọn Chiều hướng mục tiêu.');
-    if (!unit.trim()) return setErrorMessage('Vui lòng nhập Đơn vị tính.');
 
-    if (measurementScope === 'organization') {
-      const selectedOrg = units.find(u => u.id === organizationUnitId);
-      if (selectedOrg && selectedOrg.unit_type !== 'school') {
-        return setErrorMessage('Phạm vi đo lường Toàn trường yêu cầu Đơn vị quản lý phải là cấp Trường (School).');
+    if (entryMode === 'calculated') {
+      if (!numeratorMetricId) return setErrorMessage('Vui lòng chọn Tử số cho chỉ số tự động tính tỷ lệ.');
+      if (!denominatorMetricId) return setErrorMessage('Vui lòng chọn Mẫu số cho chỉ số tự động tính tỷ lệ.');
+      if (numeratorMetricId === denominatorMetricId) {
+        return setErrorMessage('Tử số và Mẫu số không được trùng nhau.');
       }
+    } else {
+      if (!dataType) return setErrorMessage('Vui lòng chọn Loại dữ liệu.');
+      if (!unit.trim()) return setErrorMessage('Vui lòng nhập Đơn vị tính.');
     }
 
     // Clean code format: A-Z 0-9 _
     const cleanedCode = code.trim().toUpperCase().replace(/\s+/g, "_").replace(/[^A-Z0-9_]/g, "");
 
+    // Prepare assignments payload
+    const assignmentsPayload = sourceAssignments
+      .filter(s => s.is_assigned)
+      .map(s => ({
+        report_source_id: s.report_source_id,
+        is_active: s.is_active,
+        is_required: entryMode === 'manual' ? s.is_required : false,
+        sort_order: s.sort_order,
+      }));
+
     setIsSubmitting(true);
     try {
-      const payload: any = {
-        name: name.trim(),
-        code: cleanedCode,
-        organization_unit_id: organizationUnitId,
-        description: description.trim() || null,
-        category,
-        measurement_scope: measurementScope,
-        data_type: dataType,
-        unit: unit.trim(),
-        aggregation_type: aggregationType,
-        frequency,
-        target_direction: targetDirection,
-        source_type: sourceType,
-        allow_manual_entry: allowManualEntry,
-        sort_order: sortOrder,
-        is_active: isActive
-      };
-
       if (mode === 'create') {
+        const payload: CreateMetricDefinitionPayload = {
+          name: name.trim(),
+          code: cleanedCode,
+          organization_unit_id: organizationUnitId || null,
+          description: description.trim() || null,
+          category,
+          entry_mode: entryMode,
+          calculation_type: entryMode === 'calculated' ? calculationType : null,
+          numerator_metric_id: entryMode === 'calculated' ? numeratorMetricId : null,
+          denominator_metric_id: entryMode === 'calculated' ? denominatorMetricId : null,
+          measurement_scope: measurementScope,
+          data_type: entryMode === 'calculated' ? 'percentage' : dataType,
+          unit: entryMode === 'calculated' ? '%' : unit.trim(),
+          aggregation_type: aggregationType,
+          frequency,
+          target_direction: targetDirection,
+          source_type: entryMode === 'calculated' ? 'system' : sourceType,
+          allow_manual_entry: entryMode === 'calculated' ? false : allowManualEntry,
+          sort_order: sortOrder,
+          is_active: isActive,
+          source_assignments: assignmentsPayload,
+        };
+
         const res = await metricService.createMetricDefinition(payload, user?.id);
         onSuccess(res.id);
       } else if (metricId) {
-        await metricService.updateMetricDefinition(metricId, payload);
+        const payload: UpdateMetricDefinitionPayload = {
+          name: name.trim(),
+          code: cleanedCode,
+          organization_unit_id: organizationUnitId || null,
+          description: description.trim() || null,
+          category,
+          entry_mode: entryMode,
+          calculation_type: entryMode === 'calculated' ? calculationType : null,
+          numerator_metric_id: entryMode === 'calculated' ? numeratorMetricId : null,
+          denominator_metric_id: entryMode === 'calculated' ? denominatorMetricId : null,
+          measurement_scope: measurementScope,
+          data_type: entryMode === 'calculated' ? 'percentage' : dataType,
+          unit: entryMode === 'calculated' ? '%' : unit.trim(),
+          aggregation_type: aggregationType,
+          frequency,
+          target_direction: targetDirection,
+          source_type: entryMode === 'calculated' ? 'system' : sourceType,
+          allow_manual_entry: entryMode === 'calculated' ? false : allowManualEntry,
+          sort_order: sortOrder,
+          is_active: isActive,
+          source_assignments: assignmentsPayload,
+        };
+
+        await metricService.updateMetricDefinition(metricId, payload, user?.id);
         onSuccess(metricId);
       }
     } catch (err: any) {
       if (err.message?.includes('duplicate key') || err.message?.includes('metric_definitions_code_organization_key')) {
-        setErrorMessage('Mã chỉ số này đã tồn tại trong Đơn vị quản lý. Vui lòng chọn mã khác.');
+        setErrorMessage('Mã chỉ số này đã tồn tại. Vui lòng chọn mã khác.');
       } else {
         setErrorMessage(err.message || 'Có lỗi xảy ra khi lưu chỉ số.');
       }
@@ -254,19 +470,19 @@ export const MetricForm: React.FC<MetricFormProps> = ({
     return (
       <div className="flex justify-center items-center py-20 text-indigo-600">
         <Loader2 className="h-8 w-8 animate-spin" />
-        <span className="ml-3 font-medium">Đang tải dữ liệu...</span>
+        <span className="ml-3 font-medium">Đang tải dữ liệu biểu mẫu...</span>
       </div>
     );
   }
 
   return (
-    <div className="mx-auto max-w-4xl space-y-6">
+    <div className="mx-auto max-w-4xl space-y-6 pb-16">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <button
             onClick={onBack}
-            className="flex h-9 w-9 items-center justify-center rounded-lg bg-white border border-slate-200 text-slate-500 hover:text-slate-700 hover:bg-slate-50 transition-colors shadow-sm"
+            className="flex h-9 w-9 items-center justify-center rounded-lg bg-white border border-slate-200 text-slate-500 hover:text-slate-700 hover:bg-slate-50 transition-colors shadow-xs"
           >
             <ArrowLeft className="h-5 w-5" />
           </button>
@@ -274,8 +490,8 @@ export const MetricForm: React.FC<MetricFormProps> = ({
             <h1 className="text-xl font-bold text-slate-900">
               {mode === 'create' ? 'Tạo mới Chỉ số đo lường' : 'Cập nhật Chỉ số đo lường'}
             </h1>
-            <p className="text-sm text-slate-500">
-              Cấu hình các tham số đo lường hiệu suất
+            <p className="text-xs text-slate-500">
+              Cấu hình hình thức thu thập (Thủ công / Tính toán) và phân bổ theo Kênh/Nguồn
             </p>
           </div>
         </div>
@@ -285,7 +501,142 @@ export const MetricForm: React.FC<MetricFormProps> = ({
         {errorMessage && (
           <div className="flex items-start gap-3 rounded-xl bg-red-50 border border-red-200 p-4 text-red-800 animate-in fade-in">
             <AlertCircle className="h-5 w-5 shrink-0 mt-0.5 text-red-600" />
-            <div className="text-sm leading-relaxed">{errorMessage}</div>
+            <div className="text-sm leading-relaxed whitespace-pre-line">{errorMessage}</div>
+          </div>
+        )}
+
+        {/* Section 1: Hình thức thu thập (Entry Mode) */}
+        <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs space-y-4">
+          <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600">
+              <Radio className="h-4 w-4" />
+            </div>
+            <div>
+              <h3 className="text-sm font-bold text-slate-900">Hình thức thu thập</h3>
+              <p className="text-xs text-slate-500">Chọn phương thức khởi tạo dữ liệu cho chỉ số</p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <label className={`relative flex items-start gap-3 rounded-xl border p-4 cursor-pointer transition-all ${
+              entryMode === 'manual' 
+                ? 'border-indigo-600 bg-indigo-50/40 ring-2 ring-indigo-500/20' 
+                : 'border-slate-200 hover:border-slate-300 bg-white'
+            }`}>
+              <input
+                type="radio"
+                name="entryMode"
+                value="manual"
+                checked={entryMode === 'manual'}
+                onChange={() => setEntryMode('manual')}
+                className="mt-0.5 h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-slate-300"
+              />
+              <div>
+                <span className="block text-sm font-semibold text-slate-900">Nhập liệu thủ công (Manual)</span>
+                <span className="block text-xs text-slate-500 mt-0.5">
+                  Nhân sự trực tiếp điền kết quả vào báo cáo hằng ngày (Số cuộc gọi, Lead, Doanh số, v.v.).
+                </span>
+              </div>
+            </label>
+
+            <label className={`relative flex items-start gap-3 rounded-xl border p-4 cursor-pointer transition-all ${
+              entryMode === 'calculated' 
+                ? 'border-indigo-600 bg-indigo-50/40 ring-2 ring-indigo-500/20' 
+                : 'border-slate-200 hover:border-slate-300 bg-white'
+            }`}>
+              <input
+                type="radio"
+                name="entryMode"
+                value="calculated"
+                checked={entryMode === 'calculated'}
+                onChange={() => setEntryMode('calculated')}
+                className="mt-0.5 h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-slate-300"
+              />
+              <div>
+                <span className="block text-sm font-semibold text-slate-900">Tự động tính toán (Calculated Ratio)</span>
+                <span className="block text-xs text-slate-500 mt-0.5">
+                  Hệ thống tự động tính tỷ lệ phần trăm thời gian thực từ 2 chỉ số thủ công (Tử số / Mẫu số).
+                </span>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        {/* Section 2: Calculated Ratio Configuration (Hiển thị khi entryMode === 'calculated') */}
+        {entryMode === 'calculated' && (
+          <div className="bg-indigo-50/60 rounded-2xl border border-indigo-200 p-6 shadow-xs space-y-4 animate-in fade-in">
+            <div className="flex items-center gap-2 border-b border-indigo-200/60 pb-3">
+              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-600 text-white shadow-xs">
+                <Calculator className="h-4 w-4" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-indigo-950">Cấu hình công thức Tỷ lệ (Ratio Formula)</h3>
+                <p className="text-xs text-indigo-700">Công thức: [Tử số] / [Mẫu số] × 100%</p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Chỉ số Tử số (Numerator) <span className="text-rose-500">*</span>
+                </label>
+                <select
+                  required={entryMode === 'calculated'}
+                  value={numeratorMetricId}
+                  onChange={(e) => setNumeratorMetricId(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 bg-white"
+                >
+                  <option value="">-- Chọn chỉ số làm Tử số --</option>
+                  {availableManualMetrics
+                    .filter(m => m.id !== denominatorMetricId)
+                    .map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.name} ({m.code})
+                      </option>
+                    ))}
+                </select>
+                <p className="text-[11px] text-slate-500 mt-1">Chỉ số thể hiện kết quả đạt được (vd: Cuộc gọi nghe máy, Đóng học phí)</p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Chỉ số Mẫu số (Denominator) <span className="text-rose-500">*</span>
+                </label>
+                <select
+                  required={entryMode === 'calculated'}
+                  value={denominatorMetricId}
+                  onChange={(e) => setDenominatorMetricId(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 bg-white"
+                >
+                  <option value="">-- Chọn chỉ số làm Mẫu số --</option>
+                  {availableManualMetrics
+                    .filter(m => m.id !== numeratorMetricId)
+                    .map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.name} ({m.code})
+                      </option>
+                    ))}
+                </select>
+                <p className="text-[11px] text-slate-500 mt-1">Chỉ số thể hiện tổng cơ sở (vd: Tổng số cuộc gọi, Tổng số Lead)</p>
+              </div>
+            </div>
+
+            {/* Formula Preview Box */}
+            {numeratorMetricId && denominatorMetricId && (
+              <div className="rounded-xl border border-indigo-200 bg-white p-3.5 flex items-center justify-between">
+                <span className="text-xs font-medium text-slate-600">Xem trước công thức:</span>
+                <div className="flex items-center gap-2 font-mono text-sm font-semibold text-indigo-900">
+                  <span className="px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-700 border border-indigo-200">
+                    {allMetrics.find(m => m.id === numeratorMetricId)?.name || 'Tử số'}
+                  </span>
+                  <span>/</span>
+                  <span className="px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-700 border border-indigo-200">
+                    {allMetrics.find(m => m.id === denominatorMetricId)?.name || 'Mẫu số'}
+                  </span>
+                  <span>× 100%</span>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -297,7 +648,7 @@ export const MetricForm: React.FC<MetricFormProps> = ({
                 <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600">
                   <Building2 className="h-4 w-4" />
                 </div>
-                <h3 className="text-sm font-bold text-slate-900">Thông tin cơ bản</h3>
+                <h3 className="text-sm font-bold text-slate-900">Thông tin định danh</h3>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
@@ -311,7 +662,7 @@ export const MetricForm: React.FC<MetricFormProps> = ({
                     value={name}
                     onChange={(e) => setName(e.target.value)}
                     onBlur={handleAutoGenerateCode}
-                    placeholder="Nhập tên chỉ số đo lường..."
+                    placeholder="VD: Tỷ lệ nghe máy, Số cuộc gọi..."
                     className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
                   />
                 </div>
@@ -326,7 +677,7 @@ export const MetricForm: React.FC<MetricFormProps> = ({
                       required
                       value={code}
                       onChange={(e) => setCode(e.target.value.toUpperCase().replace(/\s+/g, '_').replace(/[^A-Z0-9_]/g, ''))}
-                      placeholder="VD: SO_CUOC_GOI"
+                      placeholder="VD: TY_LE_NGHE_MAY"
                       className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 font-mono focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 pr-10"
                     />
                     <button
@@ -343,19 +694,19 @@ export const MetricForm: React.FC<MetricFormProps> = ({
 
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Đơn vị quản lý <span className="text-rose-500">*</span>
+                    Đơn vị quản lý (Tùy chọn / Legacy)
                   </label>
                   <select
-                    required
                     value={organizationUnitId}
                     onChange={(e) => setOrganizationUnitId(e.target.value)}
                     className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 bg-white"
                   >
-                    <option value="">-- Chọn đơn vị --</option>
+                    <option value="">-- Chung (Áp dụng theo Kênh/Nguồn) --</option>
                     {units.map((u) => (
                       <option key={u.id} value={u.id}>{u.name}</option>
                     ))}
                   </select>
+                  <p className="text-[11px] text-slate-500 mt-1">Mô hình mới: Kênh/Nguồn quyết định bộ chỉ số</p>
                 </div>
 
                 <div className="md:col-span-2">
@@ -378,7 +729,7 @@ export const MetricForm: React.FC<MetricFormProps> = ({
                     Mô tả / Hướng dẫn
                   </label>
                   <textarea
-                    rows={3}
+                    rows={2}
                     value={description}
                     onChange={(e) => setDescription(e.target.value)}
                     placeholder="Mô tả ý nghĩa của chỉ số và cách thức đo lường..."
@@ -388,90 +739,141 @@ export const MetricForm: React.FC<MetricFormProps> = ({
               </div>
             </div>
 
-            {/* Cột trái: Nguồn dữ liệu */}
-            <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs space-y-5">
-              <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
-                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-orange-50 text-orange-600">
-                  <Database className="h-4 w-4" />
+            {/* Section 3: Áp dụng cho Kênh / Nguồn báo cáo (Source Assignments) */}
+            <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs space-y-4">
+              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                <div className="flex items-center gap-2">
+                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600">
+                    <Share2 className="h-4 w-4" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900">Áp dụng cho Kênh / Nguồn báo cáo</h3>
+                    <p className="text-xs text-slate-500">Chỉ số này sẽ xuất hiện khi Staff chọn các Kênh/Nguồn được kích hoạt</p>
+                  </div>
                 </div>
-                <h3 className="text-sm font-bold text-slate-900">Nguồn dữ liệu & Cập nhật</h3>
+                <span className="text-xs px-2.5 py-1 rounded-full bg-slate-100 text-slate-600 font-medium">
+                  {sourceAssignments.filter(s => s.is_assigned && s.is_active).length} kênh đã chọn
+                </span>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Nguồn thu thập <span className="text-rose-500">*</span>
-                  </label>
-                  <select
-                    value={sourceType}
-                    onChange={(e) => setSourceType(e.target.value as MetricSourceType)}
-                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 bg-white"
-                  >
-                    {Object.entries(SOURCE_TYPE_LABELS).map(([k, v]) => (
-                      <option key={k} value={k}>{v}</option>
+              {/* Calculated Metric Dependency Warning Box */}
+              {calculatedDependencyWarnings.length > 0 && (
+                <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-900 space-y-2">
+                  <div className="flex items-center gap-2 font-semibold text-amber-800">
+                    <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
+                    <span>Lưu ý về tính hợp lệ của Kênh đã chọn:</span>
+                  </div>
+                  <ul className="list-disc pl-5 space-y-1 text-amber-800">
+                    {calculatedDependencyWarnings.map((w, idx) => (
+                      <li key={idx}>
+                        <strong>{w.sourceName}</strong>: Chưa được gán {w.missing} trong danh sách chỉ số của kênh đó.
+                      </li>
                     ))}
-                  </select>
+                  </ul>
+                  <p className="text-[11px] text-amber-700 italic">
+                    * Để chỉ số tỷ lệ hoạt động chính xác khi Staff báo cáo, hãy đảm bảo các Kênh này cũng được gán cả Tử số và Mẫu số.
+                  </p>
                 </div>
+              )}
 
-                <div className="flex items-center pt-5">
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={allowManualEntry}
-                      onChange={(e) => setAllowManualEntry(e.target.checked)}
-                      disabled={sourceType !== 'manual'}
-                      className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 h-4 w-4 disabled:opacity-50"
-                    />
-                    <span className={`text-sm font-medium ${sourceType !== 'manual' ? 'text-slate-400' : 'text-slate-700'}`}>
-                      Cho phép nhập thủ công
-                    </span>
-                  </label>
+              {allSources.length === 0 ? (
+                <div className="p-4 rounded-lg bg-slate-50 text-center text-xs text-slate-500">
+                  Chưa có Kênh/Nguồn nào được tạo trong hệ thống.
                 </div>
-              </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs border-collapse">
+                    <thead>
+                      <tr className="border-b border-slate-200 bg-slate-50/60 text-slate-600 font-medium">
+                        <th className="py-2.5 px-3 w-10">Chọn</th>
+                        <th className="py-2.5 px-3">Tên Kênh / Nguồn</th>
+                        <th className="py-2.5 px-3">Mã Kênh</th>
+                        <th className="py-2.5 px-3">Phân loại</th>
+                        {entryMode === 'manual' && (
+                          <th className="py-2.5 px-3 text-center">Bắt buộc nhập</th>
+                        )}
+                        <th className="py-2.5 px-3 text-right w-24">Thứ tự</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {sourceAssignments.map((row) => (
+                        <tr 
+                          key={row.report_source_id} 
+                          className={`hover:bg-slate-50/60 transition-colors ${row.is_assigned ? 'bg-indigo-50/20' : ''}`}
+                        >
+                          <td className="py-2.5 px-3">
+                            <input
+                              type="checkbox"
+                              checked={row.is_assigned}
+                              onChange={() => handleToggleSourceAssign(row.report_source_id)}
+                              className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 h-4 w-4"
+                            />
+                          </td>
+                          <td className="py-2.5 px-3 font-medium text-slate-800">
+                            <div className="flex items-center gap-1.5">
+                              <span>{row.source_name}</span>
+                              {!row.source_is_active && (
+                                <span className="text-[10px] px-1.5 py-0.2 rounded bg-slate-100 text-slate-500">
+                                  (Ngừng HĐ)
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="py-2.5 px-3 text-slate-500 font-mono">
+                            {row.source_code}
+                          </td>
+                          <td className="py-2.5 px-3 text-slate-500">
+                            {row.source_category || '—'}
+                          </td>
+                          {entryMode === 'manual' && (
+                            <td className="py-2.5 px-3 text-center">
+                              <input
+                                type="checkbox"
+                                checked={row.is_required}
+                                disabled={!row.is_assigned}
+                                onChange={(e) => handleUpdateAssignmentField(row.report_source_id, 'is_required', e.target.checked)}
+                                className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 h-4 w-4 disabled:opacity-40"
+                              />
+                            </td>
+                          )}
+                          <td className="py-2.5 px-3 text-right">
+                            <input
+                              type="number"
+                              value={row.sort_order}
+                              disabled={!row.is_assigned}
+                              onChange={(e) => handleUpdateAssignmentField(row.report_source_id, 'sort_order', parseInt(e.target.value) || 0)}
+                              className="w-16 rounded border border-slate-200 px-2 py-1 text-right text-xs text-slate-800 focus:border-indigo-500 disabled:bg-slate-100 disabled:opacity-40"
+                            />
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
           </div>
 
-          {/* Cột phải: Thuộc tính tính toán */}
+          {/* Cột phải: Thuộc tính đo lường & Đánh giá */}
           <div className="space-y-6">
             <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs space-y-5">
               <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
                 <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-blue-50 text-blue-600">
                   <Sliders className="h-4 w-4" />
                 </div>
-                <h3 className="text-sm font-bold text-slate-900">Thông số đo lường</h3>
+                <h3 className="text-sm font-bold text-slate-900">Thuộc tính đo lường</h3>
               </div>
 
               <div className="space-y-4">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1 flex justify-between">
-                    <span>Phạm vi đo lường <span className="text-rose-500">*</span></span>
-                    {hasEntries && (
-                      <span className="text-[10px] text-amber-600 font-medium">Không thể sửa</span>
-                    )}
-                  </label>
-                  <select
-                    value={measurementScope}
-                    onChange={(e) => setMeasurementScope(e.target.value as MeasurementScope)}
-                    disabled={hasEntries}
-                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 bg-white disabled:bg-slate-100 disabled:text-slate-500"
-                  >
-                    {Object.entries(MEASUREMENT_SCOPE_LABELS).map(([k, v]) => (
-                      <option key={k} value={k}>{v}</option>
-                    ))}
-                  </select>
-                  {hasEntries && (
-                    <p className="text-[11px] text-amber-600 mt-1">Chỉ số đã có dữ liệu phát sinh nên không thể thay đổi phạm vi đo.</p>
-                  )}
-                </div>
-
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
                     Loại dữ liệu <span className="text-rose-500">*</span>
                   </label>
                   <select
-                    value={dataType}
+                    value={entryMode === 'calculated' ? 'percentage' : dataType}
                     onChange={(e) => setDataType(e.target.value as MetricDataType)}
-                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 bg-white"
+                    disabled={entryMode === 'calculated'}
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 bg-white disabled:bg-slate-100 disabled:text-slate-500"
                   >
                     {Object.entries(DATA_TYPE_LABELS).map(([k, v]) => (
                       <option key={k} value={k}>{v}</option>
@@ -486,10 +888,11 @@ export const MetricForm: React.FC<MetricFormProps> = ({
                   <input
                     type="text"
                     required
-                    value={unit}
+                    value={entryMode === 'calculated' ? '%' : unit}
                     onChange={(e) => setUnit(e.target.value)}
-                    placeholder="VD: người, giờ, %"
-                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                    disabled={entryMode === 'calculated'}
+                    placeholder="VD: người, cuộc, %"
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 disabled:bg-slate-100 disabled:text-slate-500"
                   />
                 </div>
 
@@ -537,13 +940,10 @@ export const MetricForm: React.FC<MetricFormProps> = ({
                     ))}
                   </select>
                 </div>
-              </div>
-            </div>
 
-            <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs space-y-4">
-               <div>
+                <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Thứ tự sắp xếp (ưu tiên hiển thị)
+                    Thứ tự sắp xếp chung
                   </label>
                   <input
                     type="number"
@@ -552,6 +952,20 @@ export const MetricForm: React.FC<MetricFormProps> = ({
                     className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
                   />
                 </div>
+
+                <div className="pt-2 border-t border-slate-100 flex items-center justify-between">
+                  <span className="text-xs font-semibold text-slate-700">Trạng thái kích hoạt</span>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={isActive}
+                      onChange={(e) => setIsActive(e.target.checked)}
+                      className="sr-only peer"
+                    />
+                    <div className="w-10 h-5 bg-slate-200 peer-focus:outline-hidden rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600"></div>
+                  </label>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -568,7 +982,7 @@ export const MetricForm: React.FC<MetricFormProps> = ({
           <button
             type="submit"
             disabled={isSubmitting}
-            className="inline-flex items-center justify-center gap-2 px-6 py-2.5 text-sm font-semibold text-white bg-indigo-600 border border-transparent rounded-xl hover:bg-indigo-700 shadow-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            className="inline-flex items-center justify-center gap-2 px-6 py-2.5 text-sm font-semibold text-white bg-indigo-600 border border-transparent rounded-xl hover:bg-indigo-700 shadow-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {isSubmitting ? (
               <>
@@ -578,7 +992,7 @@ export const MetricForm: React.FC<MetricFormProps> = ({
             ) : (
               <>
                 <Save className="h-4 w-4" />
-                Lưu cấu hình
+                Lưu chỉ số
               </>
             )}
           </button>

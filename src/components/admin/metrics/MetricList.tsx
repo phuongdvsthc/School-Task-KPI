@@ -19,7 +19,8 @@ import {
   MetricDataTypeBadge, 
   MetricFrequencyBadge, 
   MetricStatusBadge,
-  MetricTargetDirectionBadge 
+  MetricTargetDirectionBadge,
+  MetricEntryModeBadge
 } from './MetricBadges';
 import { 
   Plus, 
@@ -344,11 +345,17 @@ export const MetricList: React.FC<MetricListProps> = ({
                         <span className="font-bold text-slate-900 line-clamp-2" title={metric.name}>
                           {metric.name}
                         </span>
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 flex-wrap">
                           <code className="rounded bg-slate-100 px-1.5 py-0.5 text-xs font-mono text-slate-600 border border-slate-200">
                             {metric.code}
                           </code>
                           <MetricCategoryBadge category={metric.category as string} />
+                          <MetricEntryModeBadge 
+                            entryMode={metric.entry_mode} 
+                            calculationType={metric.calculation_type}
+                            numeratorCode={metric.numerator_metric?.code}
+                            denominatorCode={metric.denominator_metric?.code}
+                          />
                         </div>
                       </div>
                     </td>

@@ -11,15 +11,18 @@ export const DailyReportManager: React.FC = () => {
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
 
-  const route = currentHash.replace('#/', '').replace('#', '');
+  const cleanRoute = currentHash.replace(/^#\/?/, '').split('?')[0];
   
-  if (route === 'daily-reports/new') {
-    return <DailyReportFormView id={undefined} />;
+  if (cleanRoute === 'daily-reports/new') {
+    return <DailyReportFormView id={undefined} key="new-daily-report" />;
   }
-  if (route.startsWith('daily-reports/') && route.endsWith('/edit')) {
-    const id = route.split('/')[1];
-    return <DailyReportFormView id={id} />;
+  
+  const editMatch = cleanRoute.match(/^daily-reports\/([^/]+)\/edit$/);
+  if (editMatch) {
+    const id = editMatch[1];
+    return <DailyReportFormView id={id} key={`edit-daily-report-${id}`} />;
   }
 
-  return <DailyReportListView />;
+  return <DailyReportListView key={`list-daily-reports-${cleanRoute}`} />;
 };
+

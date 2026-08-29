@@ -62,6 +62,9 @@ export type MetricTargetDirection =
   | 'target_exact'          // Đúng giá trị mục tiêu
   | 'none';                 // Chỉ theo dõi (Không đánh giá chiều hướng)
 
+export type MetricEntryMode = 'manual' | 'calculated';
+export type MetricCalculationType = 'ratio';
+
 /**
  * 1. Bảng metric_definitions
  */
@@ -86,10 +89,47 @@ export interface MetricDefinition {
   created_at: string;
   updated_at: string;
 
+  // v0.3.4d: Calculated metric fields
+  entry_mode?: MetricEntryMode;
+  calculation_type?: MetricCalculationType | null;
+  numerator_metric_id?: string | null;
+  denominator_metric_id?: string | null;
+
   // Joined fields for UI convenience
   unit_info?: OrganizationUnit;
   creator_profile?: Profile;
   entries_count?: number;
+  numerator_metric?: MetricDefinition;
+  denominator_metric?: MetricDefinition;
+
+  // Assignment metadata when loaded via source
+  assignment_is_required?: boolean;
+  assignment_sort_order?: number;
+}
+
+/**
+ * Bảng report_source_metric_assignments
+ */
+export interface ReportSourceMetricAssignment {
+  id: string;
+  report_source_id: string;
+  metric_definition_id: string;
+  is_active: boolean;
+  is_required: boolean;
+  sort_order: number;
+  created_by?: string | null;
+  created_at?: string;
+  updated_at?: string;
+
+  // Joined
+  report_source?: {
+    id: string;
+    code: string;
+    name: string;
+    category?: string;
+    is_active: boolean;
+  };
+  metric_definition?: MetricDefinition;
 }
 
 /**
@@ -117,14 +157,26 @@ export interface MetricEntry {
 }
 
 /**
+ * Assignment payload for metric saving
+ */
+export interface MetricSourceAssignmentInput {
+  report_source_id: string;
+  is_active: boolean;
+  is_required?: boolean;
+  sort_order?: number;
+}
+
+/**
  * Payload tạo mới metric definition
  */
 export interface CreateMetricDefinitionPayload {
   name: string;
   code: string;
-  organization_unit_id: string | null;
+  organization_unit_id?: string | null;
   description?: string | null;
   category: MetricCategory | string;
+  measurement_scope?: MeasurementScope | string;
+  source_type?: MetricSourceType | string;
   data_type: MetricDataType | string;
   unit: string;
   aggregation_type: MetricAggregationType | string;
@@ -133,6 +185,13 @@ export interface CreateMetricDefinitionPayload {
   allow_manual_entry: boolean;
   sort_order?: number;
   is_active?: boolean;
+
+  // v0.3.4d
+  entry_mode?: MetricEntryMode;
+  calculation_type?: MetricCalculationType | null;
+  numerator_metric_id?: string | null;
+  denominator_metric_id?: string | null;
+  source_assignments?: MetricSourceAssignmentInput[];
 }
 
 /**
@@ -154,6 +213,13 @@ export interface UpdateMetricDefinitionPayload {
   allow_manual_entry?: boolean;
   sort_order?: number;
   is_active?: boolean;
+
+  // v0.3.4d
+  entry_mode?: MetricEntryMode;
+  calculation_type?: MetricCalculationType | null;
+  numerator_metric_id?: string | null;
+  denominator_metric_id?: string | null;
+  source_assignments?: MetricSourceAssignmentInput[];
 }
 
 /**
