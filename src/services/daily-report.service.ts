@@ -56,6 +56,28 @@ export class DailyReportService {
     const supabase = getSupabaseClient();
     if (!supabase) throw new Error('Supabase client chưa được khởi tạo.');
 
+    // 1. Try Backend API first (Service Role proxy)
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData?.session?.access_token;
+      if (token) {
+        const queryParams = new URLSearchParams({
+          user_id: userId,
+          start_date: startDate,
+          end_date: endDate,
+        });
+        const res = await fetch(`/api/daily-reports/month?${queryParams.toString()}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data)) return data;
+        }
+      }
+    } catch (apiErr) {
+      console.warn('[DailyReportService] Backend API for monthly reports failed, trying direct query:', apiErr);
+    }
+
     try {
       const { data, error } = await this.fetchWithRetry(async () =>
         await (supabase.from as any)('daily_reports')
@@ -98,6 +120,27 @@ export class DailyReportService {
   async getDailyReportFullByDate(userId: string, date: string): Promise<DailyReport | null> {
     const supabase = getSupabaseClient();
     if (!supabase) throw new Error('Supabase client chưa được khởi tạo.');
+
+    // 1. Try Backend API first (Service Role proxy)
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData?.session?.access_token;
+      if (token) {
+        const queryParams = new URLSearchParams({
+          user_id: userId,
+          date: date,
+        });
+        const res = await fetch(`/api/daily-reports/by-date?${queryParams.toString()}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (res.ok) {
+          const data = await res.json();
+          return data;
+        }
+      }
+    } catch (apiErr) {
+      console.warn('[DailyReportService] Backend API for report by date failed, trying direct query:', apiErr);
+    }
 
     try {
       // 1. Load daily_reports record
@@ -161,6 +204,23 @@ export class DailyReportService {
   async getDailyReportFullById(id: string, userId?: string): Promise<DailyReport | null> {
     const supabase = getSupabaseClient();
     if (!supabase) throw new Error('Supabase client chưa được khởi tạo.');
+
+    // 1. Try Backend API first
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData?.session?.access_token;
+      if (token) {
+        const res = await fetch(`/api/daily-reports/${encodeURIComponent(id)}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (res.ok) {
+          const data = await res.json();
+          return data;
+        }
+      }
+    } catch (apiErr) {
+      console.warn('[DailyReportService] Backend API for report by ID failed, trying direct query:', apiErr);
+    }
 
     try {
       let query = (supabase.from as any)('daily_reports').select('*').eq('id', id);
@@ -232,6 +292,47 @@ export class DailyReportService {
       });
     }
 
+    // 1. Try Backend API first (avoids RLS restrictions and handles atomic sync)
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData?.session?.access_token;
+      if (token) {
+        const res = await fetch('/api/daily-reports', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify(payload),
+        });
+
+        if (res.ok) {
+          const savedData = await res.json();
+          return savedData as DailyReport;
+        } else {
+          const errJson = await res.json().catch(() => null);
+          if (errJson?.error) {
+            throw new Error(errJson.error);
+          }
+        }
+      }
+    } catch (apiErr: any) {
+      // If error was thrown from backend response with specific message, rethrow
+      if (apiErr.message && !apiErr.message.includes('Failed to fetch')) {
+        throw apiErr;
+      }
+      console.warn('[DailyReportService] Backend API save failed, attempting direct Supabase query fallback:', apiErr);
+    }
+
+    // 2. Direct Supabase Query Fallback
+    const isOff = payload.work_status === 'off';
+    let primarySourceChannel = 'Trực tiếp / Direct';
+    if (isOff) {
+      primarySourceChannel = 'Nghỉ phép / Off';
+    } else if (payload.sources && payload.sources.length > 0 && payload.sources[0].source_name_snapshot) {
+      primarySourceChannel = payload.sources[0].source_name_snapshot;
+    }
+
     // 1. Check existing daily report by ID or (user_id + report_date)
     let existingReport: any = null;
     if (payload.id) {
@@ -256,7 +357,6 @@ export class DailyReportService {
     }
 
     let savedReport: DailyReport;
-    const isOff = payload.work_status === 'off';
 
     if (existingReport) {
       // UPDATE daily_reports
@@ -268,6 +368,7 @@ export class DailyReportService {
         work_summary: isOff ? null : (payload.work_summary ?? null),
         issues: isOff ? null : (payload.issues ?? null),
         support_request: isOff ? null : (payload.support_request ?? null),
+        source_channel: primarySourceChannel,
         interest_group: payload.interest_group ?? null,
         related_task_id: payload.related_task_id ?? null,
         updated_at: new Date().toISOString(),
@@ -297,6 +398,7 @@ export class DailyReportService {
         work_summary: isOff ? null : (payload.work_summary ?? null),
         issues: isOff ? null : (payload.issues ?? null),
         support_request: isOff ? null : (payload.support_request ?? null),
+        source_channel: primarySourceChannel,
         interest_group: payload.interest_group ?? null,
         related_task_id: payload.related_task_id ?? null,
       };
@@ -514,6 +616,23 @@ export class DailyReportService {
     const supabase = getSupabaseClient();
     if (!supabase) throw new Error('Supabase client chưa được khởi tạo');
 
+    // 1. Try Backend API first
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData?.session?.access_token;
+      if (token) {
+        const res = await fetch(`/api/daily-reports/${encodeURIComponent(dailyReportId)}/sources/${encodeURIComponent(dailyReportSourceId)}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (res.ok) {
+          return;
+        }
+      }
+    } catch (apiErr) {
+      console.warn('[DailyReportService] Backend API deleteReportSource failed, trying direct query:', apiErr);
+    }
+
     try {
       await this.fetchWithRetry(async () =>
         await (supabase.from as any)('metric_entries')
@@ -529,6 +648,50 @@ export class DailyReportService {
       );
     } catch (err: any) {
       console.error('[DailyReportService] deleteReportSource error:', err);
+      throw err;
+    }
+  }
+
+  /**
+   * Delete full daily report by ID
+   */
+  async deleteDailyReport(id: string): Promise<void> {
+    const supabase = getSupabaseClient();
+    if (!supabase) throw new Error('Supabase client chưa được khởi tạo');
+
+    // 1. Try Backend API first
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData?.session?.access_token;
+      if (token) {
+        const res = await fetch(`/api/daily-reports/${encodeURIComponent(id)}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (res.ok) {
+          return;
+        }
+      }
+    } catch (apiErr) {
+      console.warn('[DailyReportService] Backend API deleteDailyReport failed, trying direct query:', apiErr);
+    }
+
+    try {
+      await this.fetchWithRetry(async () =>
+        await (supabase.from as any)('daily_report_task_links').delete().eq('daily_report_id', id)
+      );
+      await this.fetchWithRetry(async () =>
+        await (supabase.from as any)('metric_entries').delete().eq('source_reference_id', id)
+      );
+      await this.fetchWithRetry(async () =>
+        await (supabase.from as any)('daily_report_sources').delete().eq('daily_report_id', id)
+      );
+      const { error } = await this.fetchWithRetry(async () =>
+        await (supabase.from as any)('daily_reports').delete().eq('id', id)
+      );
+      if (error) throw error;
+    } catch (err: any) {
+      console.error('[DailyReportService] deleteDailyReport error:', err);
       throw err;
     }
   }

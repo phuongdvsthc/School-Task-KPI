@@ -1451,6 +1451,488 @@ async function startServer() {
     }
   });
 
+  // ==========================================
+  // DAILY REPORTS API (Service-Role proxy for RLS & consistency)
+  // ==========================================
+
+  // 1. Get Monthly Daily Reports for a user
+  app.get('/api/daily-reports/month', authenticateUser, async (req: Request, res: Response) => {
+    try {
+      const supabaseAdmin = res.locals.supabaseAdmin;
+      const currentUser = res.locals.user;
+      const profile = res.locals.profile;
+
+      const targetUserId = (req.query.user_id as string) || currentUser.id;
+      const startDate = req.query.start_date as string;
+      const endDate = req.query.end_date as string;
+
+      // Access check: only allow own reports or admin/manager
+      if (targetUserId !== currentUser.id && profile.system_role === 'staff') {
+        return res.status(403).json({ error: 'Không có quyền truy cập báo cáo của người dùng khác.' });
+      }
+
+      let query = supabaseAdmin
+        .from('daily_reports')
+        .select('id, report_date, user_id, organization_unit_id, work_status, report_status, submitted_at, off_note, work_summary, issues, support_request, created_at, updated_at')
+        .eq('user_id', targetUserId);
+
+      if (startDate) query = query.gte('report_date', startDate);
+      if (endDate) query = query.lte('report_date', endDate);
+
+      const { data, error } = await query.order('report_date', { ascending: true });
+      if (error) throw error;
+
+      res.json(data || []);
+    } catch (error: any) {
+      console.error('[API] Error fetching monthly reports:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // 2. Get Full Daily Report by Date
+  app.get('/api/daily-reports/by-date', authenticateUser, async (req: Request, res: Response) => {
+    try {
+      const supabaseAdmin = res.locals.supabaseAdmin;
+      const currentUser = res.locals.user;
+      const profile = res.locals.profile;
+
+      const targetUserId = (req.query.user_id as string) || currentUser.id;
+      const date = req.query.date as string;
+
+      if (!date) {
+        return res.status(400).json({ error: 'Thiếu tham số ngày báo cáo (date).' });
+      }
+
+      if (targetUserId !== currentUser.id && profile.system_role === 'staff') {
+        return res.status(403).json({ error: 'Không có quyền truy cập báo cáo của người dùng khác.' });
+      }
+
+      const { data: report, error: repErr } = await supabaseAdmin
+        .from('daily_reports')
+        .select('*')
+        .eq('user_id', targetUserId)
+        .eq('report_date', date)
+        .maybeSingle();
+
+      if (repErr) throw repErr;
+      if (!report) return res.json(null);
+
+      // Load task links
+      const { data: taskLinks } = await supabaseAdmin
+        .from('daily_report_task_links')
+        .select('id, daily_report_id, task_id, created_at')
+        .eq('daily_report_id', report.id);
+
+      // Load sources
+      const { data: sources } = await supabaseAdmin
+        .from('daily_report_sources')
+        .select('id, daily_report_id, report_source_id, source_name_snapshot, sort_order, created_at, updated_at')
+        .eq('daily_report_id', report.id)
+        .order('sort_order', { ascending: true });
+
+      res.json({
+        ...report,
+        daily_report_task_links: taskLinks || [],
+        daily_report_sources: sources || []
+      });
+    } catch (error: any) {
+      console.error('[API] Error fetching daily report by date:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // 3. Get Full Daily Report by ID
+  app.get('/api/daily-reports/:id', authenticateUser, async (req: Request, res: Response) => {
+    try {
+      const supabaseAdmin = res.locals.supabaseAdmin;
+      const currentUser = res.locals.user;
+      const profile = res.locals.profile;
+      const { id } = req.params;
+
+      const { data: report, error: repErr } = await supabaseAdmin
+        .from('daily_reports')
+        .select('*')
+        .eq('id', id)
+        .single();
+
+      if (repErr) throw repErr;
+      if (!report) return res.status(404).json({ error: 'Không tìm thấy báo cáo' });
+
+      if (report.user_id !== currentUser.id && profile.system_role === 'staff') {
+        return res.status(403).json({ error: 'Không có quyền xem báo cáo này.' });
+      }
+
+      const { data: taskLinks } = await supabaseAdmin
+        .from('daily_report_task_links')
+        .select('id, daily_report_id, task_id, created_at')
+        .eq('daily_report_id', id);
+
+      const { data: sources } = await supabaseAdmin
+        .from('daily_report_sources')
+        .select('id, daily_report_id, report_source_id, source_name_snapshot, sort_order, created_at, updated_at')
+        .eq('daily_report_id', id)
+        .order('sort_order', { ascending: true });
+
+      res.json({
+        ...report,
+        daily_report_task_links: taskLinks || [],
+        daily_report_sources: sources || []
+      });
+    } catch (error: any) {
+      console.error('[API] Error fetching daily report by ID:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // 4. Save/Upsert Multi-Source Daily Report
+  app.post('/api/daily-reports', authenticateUser, async (req: Request, res: Response) => {
+    try {
+      const supabaseAdmin = res.locals.supabaseAdmin;
+      const currentUser = res.locals.user;
+      const profile = res.locals.profile;
+      const payload = req.body;
+
+      if (!payload || !payload.report_date || !payload.user_id || !payload.organization_unit_id) {
+        return res.status(400).json({ error: 'Dữ liệu báo cáo không hợp lệ (thiếu report_date, user_id hoặc organization_unit_id).' });
+      }
+
+      // Check permission
+      if (payload.user_id !== currentUser.id && profile.system_role === 'staff') {
+        return res.status(403).json({ error: 'Không có quyền tạo hoặc chỉnh sửa báo cáo cho tài khoản khác.' });
+      }
+
+      const isOff = payload.work_status === 'off' || payload.work_status === 'Nghỉ phép';
+      const normalizedWorkStatus = isOff ? 'off' : 'working';
+
+      // Fallback for source_channel column (satisfying database NOT NULL constraint)
+      let primarySourceChannel = 'Trực tiếp / Direct';
+      if (isOff) {
+        primarySourceChannel = 'Nghỉ phép / Off';
+      } else if (payload.sources && payload.sources.length > 0 && payload.sources[0].source_name_snapshot) {
+        primarySourceChannel = payload.sources[0].source_name_snapshot;
+      } else if (payload.source_channel) {
+        primarySourceChannel = payload.source_channel;
+      }
+
+      // 1. Check if report already exists for this (user_id, report_date)
+      let reportId = payload.id;
+      let existingReport: any = null;
+
+      if (reportId) {
+        const { data } = await supabaseAdmin
+          .from('daily_reports')
+          .select('id, user_id, organization_unit_id, report_date')
+          .eq('id', reportId)
+          .maybeSingle();
+        existingReport = data;
+      }
+
+      if (!existingReport) {
+        const { data } = await supabaseAdmin
+          .from('daily_reports')
+          .select('id, user_id, organization_unit_id, report_date')
+          .eq('user_id', payload.user_id)
+          .eq('report_date', payload.report_date)
+          .maybeSingle();
+        existingReport = data;
+      }
+
+      let savedReport: any = null;
+
+      if (existingReport) {
+        reportId = existingReport.id;
+        const updateData: any = {
+          work_status: normalizedWorkStatus,
+          report_status: payload.report_status || 'draft',
+          submitted_at: payload.submitted_at ?? (payload.report_status === 'submitted' ? new Date().toISOString() : null),
+          off_note: isOff ? (payload.off_note ?? null) : null,
+          work_summary: isOff ? null : (payload.work_summary ?? null),
+          issues: isOff ? null : (payload.issues ?? null),
+          support_request: isOff ? null : (payload.support_request ?? null),
+          source_channel: primarySourceChannel,
+          interest_group: payload.interest_group ?? null,
+          related_task_id: payload.related_task_id ?? null,
+          updated_at: new Date().toISOString(),
+        };
+
+        const { data, error } = await supabaseAdmin
+          .from('daily_reports')
+          .update(updateData)
+          .eq('id', reportId)
+          .select()
+          .single();
+
+        if (error) throw new Error('Lỗi cập nhật báo cáo: ' + error.message);
+        savedReport = data;
+      } else {
+        const insertData: any = {
+          id: reportId || uuidv4(),
+          user_id: payload.user_id,
+          organization_unit_id: payload.organization_unit_id,
+          report_date: payload.report_date,
+          work_status: normalizedWorkStatus,
+          report_status: payload.report_status || 'draft',
+          submitted_at: payload.submitted_at ?? (payload.report_status === 'submitted' ? new Date().toISOString() : null),
+          off_note: isOff ? (payload.off_note ?? null) : null,
+          work_summary: isOff ? null : (payload.work_summary ?? null),
+          issues: isOff ? null : (payload.issues ?? null),
+          support_request: isOff ? null : (payload.support_request ?? null),
+          source_channel: primarySourceChannel,
+          interest_group: payload.interest_group ?? null,
+          related_task_id: payload.related_task_id ?? null,
+        };
+
+        const { data, error } = await supabaseAdmin
+          .from('daily_reports')
+          .insert([insertData])
+          .select()
+          .single();
+
+        if (error) throw new Error('Lỗi tạo mới báo cáo: ' + error.message);
+        savedReport = data;
+        reportId = savedReport.id;
+      }
+
+      // 2. Sync Task Links
+      await supabaseAdmin.from('daily_report_task_links').delete().eq('daily_report_id', reportId);
+      if (!isOff && payload.task_ids && payload.task_ids.length > 0) {
+        const taskLinkRows = payload.task_ids.map((taskId: string) => ({
+          id: uuidv4(),
+          daily_report_id: reportId,
+          task_id: taskId,
+          created_at: new Date().toISOString(),
+        }));
+        const { error: taskErr } = await supabaseAdmin.from('daily_report_task_links').insert(taskLinkRows);
+        if (taskErr) console.warn('[API] Daily report task links warning:', taskErr.message);
+      }
+
+      // 3. Handle OFF vs WORKING
+      if (isOff) {
+        // Remove sources and metric entries for this report
+        const { data: existingSources } = await supabaseAdmin
+          .from('daily_report_sources')
+          .select('id')
+          .eq('daily_report_id', reportId);
+
+        if (existingSources && existingSources.length > 0) {
+          const sourceIds = existingSources.map((s: any) => s.id);
+          await supabaseAdmin.from('metric_entries').delete().in('daily_report_source_id', sourceIds);
+          await supabaseAdmin.from('daily_report_sources').delete().eq('daily_report_id', reportId);
+        }
+        await supabaseAdmin.from('metric_entries').delete().eq('source_reference_id', reportId);
+
+        return res.json({
+          ...savedReport,
+          daily_report_task_links: [],
+          daily_report_sources: []
+        });
+      }
+
+      // 4. Handle Sources & Metric Entries for WORKING state
+      const sourcesPayload = payload.sources || [];
+
+      // Current saved sources in DB
+      const { data: currentDbSources } = await supabaseAdmin
+        .from('daily_report_sources')
+        .select('id, report_source_id')
+        .eq('daily_report_id', reportId);
+
+      const currentDbSourceMap = new Map<string, any>();
+      (currentDbSources || []).forEach((s: any) => {
+        currentDbSourceMap.set(s.report_source_id, s);
+      });
+
+      // Remove unselected sources and their metric entries
+      const keepSourceIds = new Set(sourcesPayload.map((s: any) => s.report_source_id));
+      const toDeleteSources = (currentDbSources || []).filter(
+        (s: any) => !keepSourceIds.has(s.report_source_id)
+      );
+
+      for (const delSrc of toDeleteSources) {
+        await supabaseAdmin.from('metric_entries').delete().eq('daily_report_source_id', delSrc.id);
+        await supabaseAdmin.from('daily_report_sources').delete().eq('id', delSrc.id);
+      }
+
+      const savedSourceList: any[] = [];
+
+      // Upsert each source and sync its manual metric entries
+      for (let i = 0; i < sourcesPayload.length; i++) {
+        const srcItem = sourcesPayload[i];
+        let dbSourceId: string;
+
+        const existingSourceRow = currentDbSourceMap.get(srcItem.report_source_id);
+        if (existingSourceRow) {
+          dbSourceId = existingSourceRow.id;
+          const { data: updatedSrc } = await supabaseAdmin
+            .from('daily_report_sources')
+            .update({
+              source_name_snapshot: srcItem.source_name_snapshot,
+              sort_order: i,
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', dbSourceId)
+            .select()
+            .single();
+          savedSourceList.push(updatedSrc || existingSourceRow);
+        } else {
+          dbSourceId = srcItem.id || uuidv4();
+          const insertSrcRow = {
+            id: dbSourceId,
+            daily_report_id: reportId,
+            report_source_id: srcItem.report_source_id,
+            source_name_snapshot: srcItem.source_name_snapshot,
+            sort_order: i,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          };
+
+          const { data: insertedSrc, error: insErr } = await supabaseAdmin
+            .from('daily_report_sources')
+            .insert([insertSrcRow])
+            .select()
+            .single();
+
+          if (insErr) {
+            throw new Error(`Lỗi lưu Kênh/Nguồn "${srcItem.source_name_snapshot}": ` + insErr.message);
+          }
+          savedSourceList.push(insertedSrc || insertSrcRow);
+        }
+
+        // Save manual metric entries for this specific source
+        const manualEntries = (srcItem.metrics || []).map((m: any) => ({
+          id: uuidv4(),
+          metric_definition_id: m.metric_definition_id,
+          organization_unit_id: payload.organization_unit_id,
+          user_id: payload.user_id,
+          period_start: payload.report_date,
+          period_end: payload.report_date,
+          value: Number(m.value) || 0,
+          source_type: 'manual',
+          source_reference_id: reportId,
+          daily_report_source_id: dbSourceId,
+          created_by: payload.user_id,
+        }));
+
+        for (const entry of manualEntries) {
+          const { data: existingMetric } = await supabaseAdmin
+            .from('metric_entries')
+            .select('id')
+            .eq('daily_report_source_id', entry.daily_report_source_id)
+            .eq('metric_definition_id', entry.metric_definition_id)
+            .maybeSingle();
+
+          if (existingMetric && existingMetric.id) {
+            await supabaseAdmin
+              .from('metric_entries')
+              .update({
+                value: entry.value,
+                period_start: entry.period_start,
+                period_end: entry.period_end,
+                organization_unit_id: entry.organization_unit_id,
+                user_id: entry.user_id,
+                source_reference_id: entry.source_reference_id,
+                updated_at: new Date().toISOString(),
+              })
+              .eq('id', existingMetric.id);
+          } else {
+            const { error: metricInsErr } = await supabaseAdmin
+              .from('metric_entries')
+              .insert([entry]);
+
+            if (metricInsErr && metricInsErr.code === '23505') {
+              await supabaseAdmin
+                .from('metric_entries')
+                .update({
+                  value: entry.value,
+                  daily_report_source_id: entry.daily_report_source_id,
+                  source_reference_id: entry.source_reference_id,
+                  updated_at: new Date().toISOString(),
+                })
+                .eq('metric_definition_id', entry.metric_definition_id)
+                .eq('daily_report_source_id', entry.daily_report_source_id);
+            }
+          }
+        }
+      }
+
+      // Return full updated report object
+      const { data: taskLinksFinal } = await supabaseAdmin
+        .from('daily_report_task_links')
+        .select('id, daily_report_id, task_id, created_at')
+        .eq('daily_report_id', reportId);
+
+      res.json({
+        ...savedReport,
+        daily_report_task_links: taskLinksFinal || [],
+        daily_report_sources: savedSourceList,
+      });
+    } catch (error: any) {
+      console.error('[API] Error saving daily report:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // 5. Delete Daily Report
+  app.delete('/api/daily-reports/:id', authenticateUser, async (req: Request, res: Response) => {
+    try {
+      const supabaseAdmin = res.locals.supabaseAdmin;
+      const currentUser = res.locals.user;
+      const profile = res.locals.profile;
+      const { id } = req.params;
+
+      const { data: report } = await supabaseAdmin
+        .from('daily_reports')
+        .select('id, user_id')
+        .eq('id', id)
+        .single();
+
+      if (!report) return res.status(404).json({ error: 'Không tìm thấy báo cáo' });
+      if (report.user_id !== currentUser.id && profile.system_role === 'staff') {
+        return res.status(403).json({ error: 'Không có quyền xóa báo cáo này.' });
+      }
+
+      // Delete cascade relations
+      await supabaseAdmin.from('daily_report_task_links').delete().eq('daily_report_id', id);
+      await supabaseAdmin.from('metric_entries').delete().eq('source_reference_id', id);
+      await supabaseAdmin.from('daily_report_sources').delete().eq('daily_report_id', id);
+      await supabaseAdmin.from('daily_reports').delete().eq('id', id);
+
+      res.json({ success: true, message: 'Đã xóa báo cáo thành công' });
+    } catch (error: any) {
+      console.error('[API] Error deleting daily report:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // 6. Delete a specific source from a report
+  app.delete('/api/daily-reports/:id/sources/:sourceId', authenticateUser, async (req: Request, res: Response) => {
+    try {
+      const supabaseAdmin = res.locals.supabaseAdmin;
+      const currentUser = res.locals.user;
+      const profile = res.locals.profile;
+      const { id, sourceId } = req.params;
+
+      const { data: report } = await supabaseAdmin
+        .from('daily_reports')
+        .select('id, user_id')
+        .eq('id', id)
+        .single();
+
+      if (!report) return res.status(404).json({ error: 'Không tìm thấy báo cáo' });
+      if (report.user_id !== currentUser.id && profile.system_role === 'staff') {
+        return res.status(403).json({ error: 'Không có quyền chỉnh sửa báo cáo này.' });
+      }
+
+      await supabaseAdmin.from('metric_entries').delete().eq('daily_report_source_id', sourceId);
+      await supabaseAdmin.from('daily_report_sources').delete().eq('id', sourceId).eq('daily_report_id', id);
+
+      res.json({ success: true, message: 'Đã xóa kênh nguồn thành công' });
+    } catch (error: any) {
+      console.error('[API] Error deleting report source:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // Vite middleware for development
 
 
