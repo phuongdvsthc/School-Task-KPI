@@ -98,14 +98,14 @@ export const DailyReportFormView: React.FC<{ id?: string }> = ({ id }) => {
         const primaryUnitName = orgUnitData?.name || '';
 
         if (!primaryUnitId) {
-          throw new Error('Không tìm thấy đơn vị công tác của bạn. Vui lòng liên hệ Quản trị viên để được gán vào đơn vị.');
+          throw new Error('Không xác định được đơn vị công tác chính của tài khoản.');
         }
 
         setUserUnitId(primaryUnitId);
         setUserUnitCode(primaryUnitCode);
         setUserUnitName(primaryUnitName);
 
-        // Safe dev log
+        // Safe dev log - strictly no token
         if (process.env.NODE_ENV !== 'production' || (import.meta as any).env?.DEV) {
           console.log('[DailyReport/new] Current User Organization:', {
             userId: user.id,
@@ -331,25 +331,45 @@ export const DailyReportFormView: React.FC<{ id?: string }> = ({ id }) => {
 
   const handleSave = async () => {
     if (!user || userRole !== 'staff') return;
+
+    // Validate currentUser.id and primaryOrganizationUnitId before proceeding
+    if (!user.id || !userUnitId) {
+      setError('Không xác định được đơn vị công tác chính của tài khoản.');
+      return;
+    }
+
     try {
       setIsSaving(true);
       setError(null);
 
-      const channelToSave = sourceChannel === 'Khác' && customChannel ? customChannel : sourceChannel;
+      // Development only log - strictly no token
+      if (process.env.NODE_ENV !== 'production' || (import.meta as any).env?.DEV) {
+        console.log('[DailyReport v0.3.4e] Saving report:', {
+          userId: user.id,
+          primaryOrganizationId: userUnitId,
+          reportDate: reportDate,
+        });
+      }
 
+      // Construct payload for v0.3.4e
+      // user_id = currentUser.id
+      // organization_unit_id = primaryOrganizationUnitId
+      // report_date = selectedDate
+      // work_status = current work status
+      // report_status = 'draft' initially
+      // For new v0.3.4e reports, do NOT write legacy fields: report_source_id, source_channel
       const payload: SaveDailyReportPayload = {
         id: id || undefined,
         report_date: reportDate,
         user_id: user.id,
         organization_unit_id: userUnitId,
         work_status: workStatus,
-        source_channel: channelToSave,
-        report_source_id: reportSourceId || null,
+        report_status: 'draft',
         interest_group: interestGroup || null,
         related_task_id: relatedTaskId || null,
         work_summary: workSummary || null,
         issues: issues || null,
-        support_request: supportRequest || null
+        support_request: supportRequest || null,
       };
 
       // 1. Insert or update daily_reports first
@@ -364,17 +384,21 @@ export const DailyReportFormView: React.FC<{ id?: string }> = ({ id }) => {
       const manualOnlyMetrics = manualMetrics.filter(m => m.entry_mode !== 'calculated');
 
       // Build metric entries strictly referencing dailyReport.id as source_reference_id
-      const entries = manualOnlyMetrics.map(def => ({
-        metric_definition_id: def.id,
-        organization_unit_id: report.organization_unit_id,
-        user_id: report.user_id,
-        period_start: report.report_date,
-        period_end: report.report_date,
-        value: Number(valuesMap[def.id]) || 0,
-        source_type: 'manual',
-        source_reference_id: report.id,
-        created_by: user.id,
-      }));
+      // Ensure unit and organization scoped metrics have user_id = null for RLS compliance
+      const entries = manualOnlyMetrics.map(def => {
+        const isUnitOrOrgScope = def.measurement_scope === 'unit' || def.measurement_scope === 'organization';
+        return {
+          metric_definition_id: def.id,
+          organization_unit_id: report.organization_unit_id || def.organization_unit_id || null,
+          user_id: isUnitOrOrgScope ? null : report.user_id,
+          period_start: report.report_date,
+          period_end: report.report_date,
+          value: Number(valuesMap[def.id]) || 0,
+          source_type: 'manual',
+          source_reference_id: report.id,
+          created_by: user.id,
+        };
+      });
 
       // 4. Save manual metric entries (inserts or updates without duplicate)
       if (entries.length > 0) {

@@ -1,5 +1,12 @@
 import { getSupabaseClient } from '../lib/supabase';
-import { DailyReport, SaveDailyReportPayload } from '../types/daily-report';
+import {
+  DailyReport,
+  DailyReportSourceItem,
+  DailyReportTaskLinkItem,
+  MonthSummaryStats,
+  SaveDailyReportMultiSourcePayload,
+  SaveDailyReportPayload,
+} from '../types/daily-report';
 import { MetricDefinition, MetricEntry } from '../types/metric';
 import { Task } from '../types/task';
 
@@ -14,12 +21,12 @@ const generateUUID = (): string => {
   });
 };
 
-class DailyReportService {
+export class DailyReportService {
   async fetchWithRetry(queryFn: () => Promise<any>, retries = 3) {
     for (let i = 0; i < retries; i++) {
       const res = await queryFn();
-      if (res.error && res.error.message && res.error.message.includes('JWT issued at future')) {
-        await new Promise(r => setTimeout(r, 1000));
+      if (res?.error?.message && res.error.message.includes('JWT issued at future')) {
+        await new Promise((r) => setTimeout(r, 1000));
         continue;
       }
       return res;
@@ -27,12 +34,29 @@ class DailyReportService {
     return queryFn();
   }
 
-  async getMyDailyReports(userId: string): Promise<DailyReport[]> {
+  normalizeWorkStatus(status?: string | null): 'working' | 'off' {
+    if (!status) return 'working';
+    const s = String(status).trim().toLowerCase();
+    if (s === 'off' || s === 'nghỉ phép' || s === 'nghi phep' || s === 'nghỉ' || s === 'nghi') {
+      return 'off';
+    }
+    return 'working';
+  }
+
+  /**
+   * Load Daily Reports for current authenticated Staff for a specific month range
+   * Filter: user_id = userId, report_date >= startDate, report_date <= endDate
+   * Does NOT filter by organization unit for personal report list
+   */
+  async getMyDailyReportsForMonth(
+    userId: string,
+    startDate: string,
+    endDate: string
+  ): Promise<DailyReport[]> {
     const supabase = getSupabaseClient();
     if (!supabase) throw new Error('Supabase client chưa được khởi tạo.');
 
     try {
-      // Query with left join to report_sources
       const { data, error } = await this.fetchWithRetry(async () =>
         await (supabase.from as any)('daily_reports')
           .select(`
@@ -40,296 +64,657 @@ class DailyReportService {
             report_date,
             user_id,
             organization_unit_id,
-            report_source_id,
-            source_channel,
             work_status,
+            report_status,
+            submitted_at,
+            off_note,
             work_summary,
+            issues,
+            support_request,
             created_at,
-            report_sources (
-              id,
-              code,
-              name
-            )
+            updated_at
           `)
           .eq('user_id', userId)
-          .order('report_date', { ascending: false })
-          .order('created_at', { ascending: false })
+          .gte('report_date', startDate)
+          .lte('report_date', endDate)
+          .order('report_date', { ascending: true })
       );
 
       if (error) {
-        // Fallback without relation if PostgREST relation is not cached or differs
-        console.warn('[DailyReportService] Relation query failed, fallback to plain select:', error.message);
-        const { data: fallbackData, error: fallbackErr } = await this.fetchWithRetry(async () =>
-          await (supabase.from as any)('daily_reports')
-            .select(`
-              id,
-              report_date,
-              user_id,
-              organization_unit_id,
-              report_source_id,
-              source_channel,
-              work_status,
-              work_summary,
-              created_at
-            `)
-            .eq('user_id', userId)
-            .order('report_date', { ascending: false })
-            .order('created_at', { ascending: false })
-        );
-
-        if (fallbackErr) {
-          throw new Error('Không thể tải danh sách báo cáo hằng ngày: ' + fallbackErr.message);
-        }
-
-        return (fallbackData || []) as DailyReport[];
+        console.error('[DailyReportService] Error fetching monthly reports:', error);
+        throw new Error('Không thể tải danh sách báo cáo tháng: ' + error.message);
       }
 
       return (data || []) as DailyReport[];
     } catch (err: any) {
-      console.error('[DailyReportService] Error fetching user daily reports:', err);
+      console.error('[DailyReportService] getMyDailyReportsForMonth error:', err);
       throw err;
     }
   }
 
-  async getDailyReportsByUnit(unitId: string): Promise<DailyReport[]> {
+  /**
+   * Get full details of a daily report by Date for current staff
+   */
+  async getDailyReportFullByDate(userId: string, date: string): Promise<DailyReport | null> {
     const supabase = getSupabaseClient();
     if (!supabase) throw new Error('Supabase client chưa được khởi tạo.');
-    
+
     try {
-      const { data, error } = await this.fetchWithRetry(async () =>
+      // 1. Load daily_reports record
+      const { data: reportData, error: reportErr } = await this.fetchWithRetry(async () =>
         await (supabase.from as any)('daily_reports')
-          .select(`
-            id,
-            report_date,
-            user_id,
-            organization_unit_id,
-            report_source_id,
-            source_channel,
-            work_status,
-            work_summary,
-            created_at,
-            user:profiles(full_name),
-            report_sources (
-              id,
-              code,
-              name
-            )
-          `)
-          .eq('organization_unit_id', unitId)
-          .order('report_date', { ascending: false })
-          .order('created_at', { ascending: false })
+          .select('*')
+          .eq('user_id', userId)
+          .eq('report_date', date)
+          .maybeSingle()
       );
 
-      if (error) {
-        console.warn('[DailyReportService] getDailyReportsByUnit relation failed, fallback:', error.message);
-        const { data: fallbackData, error: fallbackErr } = await this.fetchWithRetry(async () =>
-          await (supabase.from as any)('daily_reports')
-            .select('*, user:profiles(full_name)')
-            .eq('organization_unit_id', unitId)
-            .order('report_date', { ascending: false })
-            .order('created_at', { ascending: false })
-        );
-        if (fallbackErr) throw new Error('Không thể tải báo cáo theo đơn vị: ' + fallbackErr.message);
-        return (fallbackData || []) as DailyReport[];
+      if (reportErr) {
+        throw new Error('Lỗi kiểm tra báo cáo ngày: ' + reportErr.message);
       }
 
-      return (data || []) as DailyReport[];
+      if (!reportData) {
+        return null;
+      }
+
+      const reportId = reportData.id;
+
+      // 2. Load daily_report_task_links
+      const { data: taskLinks, error: taskLinksErr } = await this.fetchWithRetry(async () =>
+        await (supabase.from as any)('daily_report_task_links')
+          .select('id, daily_report_id, task_id, created_at')
+          .eq('daily_report_id', reportId)
+      );
+
+      if (taskLinksErr) {
+        console.warn('[DailyReportService] Error loading task links:', taskLinksErr.message);
+      }
+
+      // 3. Load daily_report_sources
+      const { data: reportSources, error: sourcesErr } = await this.fetchWithRetry(async () =>
+        await (supabase.from as any)('daily_report_sources')
+          .select('id, daily_report_id, report_source_id, source_name_snapshot, sort_order, created_at, updated_at')
+          .eq('daily_report_id', reportId)
+          .order('sort_order', { ascending: true })
+      );
+
+      if (sourcesErr) {
+        console.warn('[DailyReportService] Error loading report sources:', sourcesErr.message);
+      }
+
+      const fullReport: DailyReport = {
+        ...reportData,
+        daily_report_task_links: (taskLinks || []) as DailyReportTaskLinkItem[],
+        daily_report_sources: (reportSources || []) as DailyReportSourceItem[],
+      };
+
+      return fullReport;
     } catch (err: any) {
-      console.error('[DailyReportService] getDailyReportsByUnit error:', err);
+      console.error('[DailyReportService] getDailyReportFullByDate error:', err);
       throw err;
     }
   }
 
-  async getDailyReportById(id: string, userId?: string): Promise<DailyReport> {
+  /**
+   * Get full details of a daily report by ID
+   */
+  async getDailyReportFullById(id: string, userId?: string): Promise<DailyReport | null> {
     const supabase = getSupabaseClient();
     if (!supabase) throw new Error('Supabase client chưa được khởi tạo.');
-    
-    try {
-      let query = (supabase.from as any)('daily_reports')
-        .select(`
-          id,
-          report_date,
-          user_id,
-          organization_unit_id,
-          report_source_id,
-          source_channel,
-          interest_group,
-          related_task_id,
-          work_status,
-          work_summary,
-          issues,
-          support_request,
-          created_at,
-          updated_at,
-          report_sources (
-            id,
-            code,
-            name
-          )
-        `)
-        .eq('id', id);
 
+    try {
+      let query = (supabase.from as any)('daily_reports').select('*').eq('id', id);
       if (userId) {
         query = query.eq('user_id', userId);
       }
 
-      const { data, error } = await this.fetchWithRetry(async () => await query.single());
-      
-      if (error) {
-        console.warn('[DailyReportService] getDailyReportById relation failed, fallback:', error.message);
-        let fallbackQuery = (supabase.from as any)('daily_reports').select('*').eq('id', id);
-        if (userId) {
-          fallbackQuery = fallbackQuery.eq('user_id', userId);
-        }
-        const { data: fallbackData, error: fallbackErr } = await this.fetchWithRetry(async () => await fallbackQuery.single());
-        if (fallbackErr) throw new Error('Không thể tải chi tiết báo cáo: ' + fallbackErr.message);
-        return fallbackData as DailyReport;
+      const { data: reportData, error: reportErr } = await this.fetchWithRetry(async () =>
+        await query.maybeSingle()
+      );
+
+      if (reportErr) {
+        throw new Error('Lỗi tải báo cáo: ' + reportErr.message);
       }
 
-      return data as DailyReport;
+      if (!reportData) return null;
+
+      // Load task links
+      const { data: taskLinks } = await this.fetchWithRetry(async () =>
+        await (supabase.from as any)('daily_report_task_links')
+          .select('id, daily_report_id, task_id, created_at')
+          .eq('daily_report_id', id)
+      );
+
+      // Load report sources
+      const { data: reportSources } = await this.fetchWithRetry(async () =>
+        await (supabase.from as any)('daily_report_sources')
+          .select('id, daily_report_id, report_source_id, source_name_snapshot, sort_order, created_at, updated_at')
+          .eq('daily_report_id', id)
+          .order('sort_order', { ascending: true })
+      );
+
+      return {
+        ...reportData,
+        daily_report_task_links: (taskLinks || []) as DailyReportTaskLinkItem[],
+        daily_report_sources: (reportSources || []) as DailyReportSourceItem[],
+      };
     } catch (err: any) {
-      console.error('[DailyReportService] getDailyReportById error:', err);
+      console.error('[DailyReportService] getDailyReportFullById error:', err);
       throw err;
     }
   }
 
-  async saveDailyReport(payload: SaveDailyReportPayload): Promise<DailyReport> {
+  /**
+   * Save Daily Report with Multi-Source & Task links in v0.3.4e model
+   * Order:
+   * A. Upsert daily_reports (unique user_id + report_date)
+   * B. Save daily_report_task_links
+   * C. If off: clean sources and metric entries
+   * D. If working: Save daily_report_sources & manual metric_entries
+   */
+  async saveDailyReportMultiSource(payload: SaveDailyReportMultiSourcePayload): Promise<DailyReport> {
     const supabase = getSupabaseClient();
-    if (!supabase) throw new Error('Supabase client not initialized');
+    if (!supabase) throw new Error('Supabase client chưa được khởi tạo');
 
-    let existing: any = null;
-    if (payload.id) {
-       const { data, error } = await this.fetchWithRetry(async () => await (supabase.from as any)('daily_reports').select('id').eq('id', payload.id).maybeSingle());
-       if (error) throw new Error('Lỗi kiểm tra báo cáo: ' + error.message);
-       existing = data;
-    } else {
-       const { data, error } = await this.fetchWithRetry(async () => await 
-         (supabase.from as any)('daily_reports')
-           .select('id')
-           .eq('user_id', payload.user_id)
-           .eq('organization_unit_id', payload.organization_unit_id)
-           .eq('report_date', payload.report_date)
-           .eq('source_channel', payload.source_channel)
-           .maybeSingle()
-       );
-       if (error) throw new Error('Lỗi kiểm tra báo cáo: ' + error.message);
-       existing = data;
+    if (!payload.user_id || !payload.organization_unit_id) {
+      throw new Error('Không xác định được đơn vị công tác chính của tài khoản.');
     }
 
-    if (existing) {
-       const { data, error } = await this.fetchWithRetry(async () => await (supabase.from as any)('daily_reports').update(payload).eq('id', existing.id).select().single());
-       if (error) throw new Error('Lỗi cập nhật báo cáo: ' + error.message);
-       return data as DailyReport;
+    if (process.env.NODE_ENV !== 'production' || (import.meta as any).env?.DEV) {
+      console.log('[DailyReportService v0.3.4e.3] Saving multi-source report:', {
+        userId: payload.user_id,
+        primaryOrgId: payload.organization_unit_id,
+        reportDate: payload.report_date,
+        workStatus: payload.work_status,
+        reportStatus: payload.report_status,
+        sourcesCount: payload.sources?.length || 0,
+        taskLinksCount: payload.task_ids?.length || 0,
+      });
+    }
+
+    // 1. Check existing daily report by ID or (user_id + report_date)
+    let existingReport: any = null;
+    if (payload.id) {
+      const { data } = await this.fetchWithRetry(async () =>
+        await (supabase.from as any)('daily_reports')
+          .select('id, user_id, organization_unit_id, report_date')
+          .eq('id', payload.id)
+          .maybeSingle()
+      );
+      existingReport = data;
+    }
+
+    if (!existingReport) {
+      const { data } = await this.fetchWithRetry(async () =>
+        await (supabase.from as any)('daily_reports')
+          .select('id, user_id, organization_unit_id, report_date')
+          .eq('user_id', payload.user_id)
+          .eq('report_date', payload.report_date)
+          .maybeSingle()
+      );
+      existingReport = data;
+    }
+
+    let savedReport: DailyReport;
+    const isOff = payload.work_status === 'off';
+
+    if (existingReport) {
+      // UPDATE daily_reports
+      const updateData: any = {
+        work_status: payload.work_status,
+        report_status: payload.report_status,
+        submitted_at: payload.submitted_at ?? (payload.report_status === 'submitted' ? new Date().toISOString() : null),
+        off_note: isOff ? (payload.off_note ?? null) : null,
+        work_summary: isOff ? null : (payload.work_summary ?? null),
+        issues: isOff ? null : (payload.issues ?? null),
+        support_request: isOff ? null : (payload.support_request ?? null),
+        interest_group: payload.interest_group ?? null,
+        related_task_id: payload.related_task_id ?? null,
+        updated_at: new Date().toISOString(),
+      };
+
+      const { data, error } = await this.fetchWithRetry(async () =>
+        await (supabase.from as any)('daily_reports')
+          .update(updateData)
+          .eq('id', existingReport.id)
+          .select()
+          .single()
+      );
+
+      if (error) throw new Error('Lỗi cập nhật báo cáo ngày: ' + error.message);
+      savedReport = data as DailyReport;
     } else {
-       const insertPayload = {
-         ...payload,
-         id: payload.id || generateUUID(),
-       };
-       const { data, error } = await this.fetchWithRetry(async () => await (supabase.from as any)('daily_reports').insert([insertPayload]).select().single());
-       if (error) throw new Error('Lỗi tạo báo cáo: ' + error.message);
-       return data as DailyReport;
+      // INSERT daily_reports
+      const insertData: any = {
+        id: payload.id || generateUUID(),
+        user_id: payload.user_id,
+        organization_unit_id: payload.organization_unit_id,
+        report_date: payload.report_date,
+        work_status: payload.work_status,
+        report_status: payload.report_status,
+        submitted_at: payload.submitted_at ?? (payload.report_status === 'submitted' ? new Date().toISOString() : null),
+        off_note: isOff ? (payload.off_note ?? null) : null,
+        work_summary: isOff ? null : (payload.work_summary ?? null),
+        issues: isOff ? null : (payload.issues ?? null),
+        support_request: isOff ? null : (payload.support_request ?? null),
+        interest_group: payload.interest_group ?? null,
+        related_task_id: payload.related_task_id ?? null,
+      };
+
+      const { data, error } = await this.fetchWithRetry(async () =>
+        await (supabase.from as any)('daily_reports')
+          .insert([insertData])
+          .select()
+          .single()
+      );
+
+      if (error) throw new Error('Lỗi tạo mới báo cáo ngày: ' + error.message);
+      savedReport = data as DailyReport;
+    }
+
+    const dailyReportId = savedReport.id;
+
+    // 2. Save daily_report_task_links
+    // First remove old task links
+    await this.fetchWithRetry(async () =>
+      await (supabase.from as any)('daily_report_task_links')
+        .delete()
+        .eq('daily_report_id', dailyReportId)
+    );
+
+    // If working and has tasks selected, insert new task links
+    if (!isOff && payload.task_ids && payload.task_ids.length > 0) {
+      const taskLinkRows = payload.task_ids.map((taskId) => ({
+        id: generateUUID(),
+        daily_report_id: dailyReportId,
+        task_id: taskId,
+        created_at: new Date().toISOString(),
+      }));
+
+      const { error: taskLinkInsertErr } = await this.fetchWithRetry(async () =>
+        await (supabase.from as any)('daily_report_task_links').insert(taskLinkRows)
+      );
+
+      if (taskLinkInsertErr) {
+        console.warn('[DailyReportService] Error saving task links:', taskLinkInsertErr.message);
+      }
+    }
+
+    // 3. Handle OFF state vs WORKING state
+    if (isOff) {
+      // Clean any existing sources and metric entries for this report
+      const { data: existingSources } = await this.fetchWithRetry(async () =>
+        await (supabase.from as any)('daily_report_sources')
+          .select('id')
+          .eq('daily_report_id', dailyReportId)
+      );
+
+      if (existingSources && existingSources.length > 0) {
+        const sourceIds = existingSources.map((s: any) => s.id);
+        await this.fetchWithRetry(async () =>
+          await (supabase.from as any)('metric_entries')
+            .delete()
+            .in('daily_report_source_id', sourceIds)
+        );
+        await this.fetchWithRetry(async () =>
+          await (supabase.from as any)('daily_report_sources')
+            .delete()
+            .eq('daily_report_id', dailyReportId)
+        );
+      }
+
+      await this.fetchWithRetry(async () =>
+        await (supabase.from as any)('metric_entries')
+          .delete()
+          .eq('source_reference_id', dailyReportId)
+      );
+
+      return savedReport;
+    }
+
+    // 4. Handle Multi-Source & Metric Entries for WORKING state
+    const sourcesPayload = payload.sources || [];
+
+    // Fetch currently saved daily_report_sources
+    const { data: currentDbSources } = await this.fetchWithRetry(async () =>
+      await (supabase.from as any)('daily_report_sources')
+        .select('id, report_source_id')
+        .eq('daily_report_id', dailyReportId)
+    );
+
+    const currentDbSourceMap = new Map<string, any>();
+    (currentDbSources || []).forEach((s: any) => {
+      currentDbSourceMap.set(s.report_source_id, s);
+    });
+
+    // Determine sources to delete
+    const keepSourceDefinitionIds = new Set(sourcesPayload.map((s) => s.report_source_id));
+    const toDeleteSources = (currentDbSources || []).filter(
+      (s: any) => !keepSourceDefinitionIds.has(s.report_source_id)
+    );
+
+    for (const delSrc of toDeleteSources) {
+      await this.fetchWithRetry(async () =>
+        await (supabase.from as any)('metric_entries')
+          .delete()
+          .eq('daily_report_source_id', delSrc.id)
+      );
+      await this.fetchWithRetry(async () =>
+        await (supabase.from as any)('daily_report_sources').delete().eq('id', delSrc.id)
+      );
+    }
+
+    // Upsert each source and save its manual metric entries
+    for (let i = 0; i < sourcesPayload.length; i++) {
+      const srcItem = sourcesPayload[i];
+      let dbSourceId: string;
+
+      const existingSourceRow = currentDbSourceMap.get(srcItem.report_source_id);
+      if (existingSourceRow) {
+        dbSourceId = existingSourceRow.id;
+        await this.fetchWithRetry(async () =>
+          await (supabase.from as any)('daily_report_sources')
+            .update({
+              source_name_snapshot: srcItem.source_name_snapshot,
+              sort_order: i,
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', dbSourceId)
+        );
+      } else {
+        dbSourceId = srcItem.id || generateUUID();
+        const insertSrcRow = {
+          id: dbSourceId,
+          daily_report_id: dailyReportId,
+          report_source_id: srcItem.report_source_id,
+          source_name_snapshot: srcItem.source_name_snapshot,
+          sort_order: i,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+
+        const { error: insErr } = await this.fetchWithRetry(async () =>
+          await (supabase.from as any)('daily_report_sources').insert([insertSrcRow])
+        );
+        if (insErr) {
+          throw new Error(`Lỗi lưu Kênh/Nguồn "${srcItem.source_name_snapshot}": ` + insErr.message);
+        }
+      }
+
+      // Save manual metric entries for this specific source
+      const manualEntries = (srcItem.metrics || []).map((m) => ({
+        id: generateUUID(),
+        metric_definition_id: m.metric_definition_id,
+        organization_unit_id: payload.organization_unit_id,
+        user_id: payload.user_id,
+        period_start: payload.report_date,
+        period_end: payload.report_date,
+        value: Number(m.value) || 0,
+        source_type: 'manual',
+        source_reference_id: dailyReportId,
+        daily_report_source_id: dbSourceId,
+        created_by: payload.user_id,
+      }));
+
+      for (const entry of manualEntries) {
+        // Upsert by matching daily_report_source_id + metric_definition_id
+        const { data: existingMetric } = await this.fetchWithRetry(async () =>
+          await (supabase.from as any)('metric_entries')
+            .select('id')
+            .eq('daily_report_source_id', entry.daily_report_source_id)
+            .eq('metric_definition_id', entry.metric_definition_id)
+            .maybeSingle()
+        );
+
+        if (existingMetric && existingMetric.id) {
+          await this.fetchWithRetry(async () =>
+            await (supabase.from as any)('metric_entries')
+              .update({
+                value: entry.value,
+                period_start: entry.period_start,
+                period_end: entry.period_end,
+                organization_unit_id: entry.organization_unit_id,
+                user_id: entry.user_id,
+                source_reference_id: entry.source_reference_id,
+                updated_at: new Date().toISOString(),
+              })
+              .eq('id', existingMetric.id)
+          );
+        } else {
+          const { error: metricInsErr } = await this.fetchWithRetry(async () =>
+            await (supabase.from as any)('metric_entries').insert([entry])
+          );
+          if (metricInsErr) {
+            if (metricInsErr.code === '23505') {
+              // On constraint conflict, update
+              await (supabase.from as any)('metric_entries')
+                .update({
+                  value: entry.value,
+                  daily_report_source_id: entry.daily_report_source_id,
+                  source_reference_id: entry.source_reference_id,
+                  updated_at: new Date().toISOString(),
+                })
+                .eq('metric_definition_id', entry.metric_definition_id)
+                .eq('daily_report_source_id', entry.daily_report_source_id);
+            } else {
+              console.warn('[DailyReportService] Metric entry insert error:', metricInsErr.message);
+            }
+          }
+        }
+      }
+    }
+
+    return savedReport;
+  }
+
+  /**
+   * Delete a specific report source and its metric entries
+   */
+  async deleteReportSource(dailyReportId: string, dailyReportSourceId: string): Promise<void> {
+    const supabase = getSupabaseClient();
+    if (!supabase) throw new Error('Supabase client chưa được khởi tạo');
+
+    try {
+      await this.fetchWithRetry(async () =>
+        await (supabase.from as any)('metric_entries')
+          .delete()
+          .eq('daily_report_source_id', dailyReportSourceId)
+      );
+
+      await this.fetchWithRetry(async () =>
+        await (supabase.from as any)('daily_report_sources')
+          .delete()
+          .eq('id', dailyReportSourceId)
+          .eq('daily_report_id', dailyReportId)
+      );
+    } catch (err: any) {
+      console.error('[DailyReportService] deleteReportSource error:', err);
+      throw err;
     }
   }
 
+  /**
+   * Backward-compatible save metrics method supporting both entries array and positional arguments
+   */
+  async saveDailyReportMetrics(
+    reportIdOrEntries: string | any[],
+    unitId?: string,
+    userId?: string,
+    reportDate?: string,
+    metricsList?: MetricDefinition[],
+    valuesMap?: Record<string, number>
+  ): Promise<void> {
+    const supabase = getSupabaseClient();
+    if (!supabase) throw new Error('Supabase client not initialized');
+
+    if (Array.isArray(reportIdOrEntries)) {
+      const entries = reportIdOrEntries;
+      for (const entry of entries) {
+        const { data: existing } = await this.fetchWithRetry(async () =>
+          await (supabase.from as any)('metric_entries')
+            .select('id')
+            .eq('source_reference_id', entry.source_reference_id)
+            .eq('metric_definition_id', entry.metric_definition_id)
+            .maybeSingle()
+        );
+
+        if (existing) {
+          await this.fetchWithRetry(async () =>
+            await (supabase.from as any)('metric_entries')
+              .update({
+                value: entry.value,
+                period_start: entry.period_start,
+                period_end: entry.period_end,
+                organization_unit_id: entry.organization_unit_id,
+                user_id: entry.user_id,
+                updated_at: new Date().toISOString(),
+              })
+              .eq('id', existing.id)
+          );
+        } else {
+          await this.fetchWithRetry(async () =>
+            await (supabase.from as any)('metric_entries').insert([
+              {
+                id: entry.id || generateUUID(),
+                metric_definition_id: entry.metric_definition_id,
+                organization_unit_id: entry.organization_unit_id,
+                user_id: entry.user_id,
+                period_start: entry.period_start,
+                period_end: entry.period_end,
+                value: entry.value,
+                source_type: entry.source_type || 'manual',
+                source_reference_id: entry.source_reference_id,
+                created_by: entry.created_by,
+              },
+            ])
+          );
+        }
+      }
+      return;
+    }
+
+    const reportId = reportIdOrEntries;
+    const manualMetrics = (metricsList || []).filter((m) => m.entry_mode !== 'calculated');
+    for (const metric of manualMetrics) {
+      const val = valuesMap?.[metric.id];
+      if (val !== undefined && val !== null && !isNaN(Number(val))) {
+        const isUnitScoped = metric.measurement_scope === 'unit' || metric.measurement_scope === 'organization';
+        const entryUserId = isUnitScoped ? null : userId;
+
+        const { data: existing } = await this.fetchWithRetry(async () =>
+          await (supabase.from as any)('metric_entries')
+            .select('id')
+            .eq('source_reference_id', reportId)
+            .eq('metric_definition_id', metric.id)
+            .maybeSingle()
+        );
+
+        if (existing) {
+          await this.fetchWithRetry(async () =>
+            await (supabase.from as any)('metric_entries')
+              .update({
+                value: Number(val),
+                period_start: reportDate,
+                period_end: reportDate,
+                organization_unit_id: unitId,
+                user_id: entryUserId,
+                updated_at: new Date().toISOString(),
+              })
+              .eq('id', existing.id)
+          );
+        } else {
+          await this.fetchWithRetry(async () =>
+            await (supabase.from as any)('metric_entries').insert([
+              {
+                id: generateUUID(),
+                metric_definition_id: metric.id,
+                organization_unit_id: unitId,
+                user_id: entryUserId,
+                period_start: reportDate,
+                period_end: reportDate,
+                value: Number(val),
+                source_type: 'manual',
+                source_reference_id: reportId,
+                created_by: userId,
+              },
+            ])
+          );
+        }
+      }
+    }
+  }
+
+  /**
+   * Get metrics for a specific daily report
+   */
   async getDailyReportMetrics(reportId: string): Promise<MetricEntry[]> {
     const supabase = getSupabaseClient();
     if (!supabase) throw new Error('Supabase client not initialized');
-    
-    const { data, error } = await this.fetchWithRetry(async () => await (supabase.from as any)('metric_entries').select('*').eq('source_reference_id', reportId));
+
+    const { data, error } = await this.fetchWithRetry(async () =>
+      await (supabase.from as any)('metric_entries')
+        .select('*')
+        .eq('source_reference_id', reportId)
+    );
     if (error) throw new Error('Không thể tải metrics của báo cáo: ' + error.message);
-    
+
     return data as MetricEntry[];
   }
 
-  async saveDailyReportMetrics(entries: any[]): Promise<void> {
-    const supabase = getSupabaseClient();
-    if (!supabase) throw new Error('Supabase client not initialized');
-
-    for (const entry of entries) {
-       // Find existing metric entry by metric_definition_id + source_reference_id (dailyReport.id)
-       const { data: existing } = await this.fetchWithRetry(async () => await (supabase.from as any)('metric_entries')
-          .select('id')
-          .eq('metric_definition_id', entry.metric_definition_id)
-          .eq('source_reference_id', entry.source_reference_id)
-          .maybeSingle()
-       );
-
-       if (existing) {
-          const { error } = await this.fetchWithRetry(async () => await (supabase.from as any)('metric_entries')
-            .update({
-              value: entry.value,
-              period_start: entry.period_start,
-              period_end: entry.period_end,
-              organization_unit_id: entry.organization_unit_id,
-              user_id: entry.user_id,
-              source_type: 'manual',
-              source_reference_id: entry.source_reference_id,
-              updated_at: new Date().toISOString(),
-            })
-            .eq('id', existing.id)
-          );
-          if (error) throw new Error(`Lỗi cập nhật metric ${entry.metric_definition_id}: ` + error.message);
-       } else {
-          const insertEntry = {
-            id: entry.id || generateUUID(),
-            metric_definition_id: entry.metric_definition_id,
-            organization_unit_id: entry.organization_unit_id,
-            user_id: entry.user_id,
-            period_start: entry.period_start,
-            period_end: entry.period_end,
-            value: entry.value,
-            source_type: 'manual',
-            source_reference_id: entry.source_reference_id,
-            created_by: entry.created_by,
-          };
-          const { error } = await this.fetchWithRetry(async () => await (supabase.from as any)('metric_entries').insert([insertEntry]));
-          if (error) throw new Error(`Lỗi tạo metric ${entry.metric_definition_id}: ` + error.message);
-       }
-    }
+  /**
+   * Legacy method for backward compatibility
+   */
+  async getMyDailyReports(userId: string): Promise<DailyReport[]> {
+    return this.getMyDailyReportsForMonth(userId, '2000-01-01', '2099-12-31');
   }
 
-  calculateDailyRatios(valuesMap: Record<string, number>, defs: MetricDefinition[]): Record<string, string> {
-     // We need to map code -> value
-     const codeValueMap: Record<string, number> = {};
-     defs.forEach(def => {
-        codeValueMap[def.code] = valuesMap[def.id] || 0;
-     });
+  async getDailyReportById(id: string, userId?: string): Promise<DailyReport> {
+    const res = await this.getDailyReportFullById(id, userId);
+    if (!res) throw new Error('Không tìm thấy báo cáo');
+    return res;
+  }
 
-     const safeDiv = (num: number, den: number) => den === 0 ? 0 : (num / den);
-     const toPercent = (val: number) => (val * 100).toFixed(1) + '%';
-
-     return {
-        'Tỷ lệ nghe máy': toPercent(safeDiv(codeValueMap['CUOC_GOI_NGHE_MAY'] || 0, codeValueMap['SO_CUOC_GOI'] || 0)),
-        'Tỷ lệ đến trường': toPercent(safeDiv(codeValueMap['KHACH_DA_DEN'] || 0, codeValueMap['KHACH_HEN'] || 0)),
-        'Tỷ lệ hồ sơ/lead': toPercent(safeDiv(codeValueMap['HO_SO_DANG_KY'] || 0, codeValueMap['TONG_LEAD'] || 0)),
-        'Tỷ lệ đóng HP/hồ sơ': toPercent(safeDiv(codeValueMap['DONG_HOC_PHI'] || 0, codeValueMap['HO_SO_DANG_KY'] || 0)),
-        'Tỷ lệ chuyển đổi cuối': toPercent(safeDiv(codeValueMap['DONG_HOC_PHI'] || 0, codeValueMap['TONG_LEAD'] || 0)),
-     };
+  async saveDailyReport(payload: SaveDailyReportPayload): Promise<DailyReport> {
+    return this.saveDailyReportMultiSource({
+      id: payload.id,
+      report_date: payload.report_date,
+      user_id: payload.user_id,
+      organization_unit_id: payload.organization_unit_id,
+      work_status: payload.work_status === 'Nghỉ phép' || payload.work_status === 'off' ? 'off' : 'working',
+      report_status: (payload.report_status as any) || 'draft',
+      submitted_at: payload.submitted_at,
+      off_note: payload.off_note,
+      work_summary: payload.work_summary,
+      issues: payload.issues,
+      support_request: payload.support_request,
+      interest_group: payload.interest_group,
+      related_task_id: payload.related_task_id,
+    });
   }
 
   async getReportSourcesForUnit(unitId: string): Promise<any[]> {
     const supabase = getSupabaseClient();
     if (!supabase) throw new Error('Supabase client not initialized');
 
-    // 1. Direct Supabase query (assignments -> report_sources where assignment.is_active = true and report_sources.is_active = true)
     try {
-      const { data, error } = await this.fetchWithRetry(async () => await (supabase.from as any)('report_source_unit_assignments')
-        .select(`
-          sort_order,
-          is_active,
-          organization_unit_id,
-          report_sources (
-            id,
-            code,
-            name,
-            category,
-            description,
+      const { data, error } = await this.fetchWithRetry(async () =>
+        await (supabase.from as any)('report_source_unit_assignments')
+          .select(`
+            sort_order,
             is_active,
-            sort_order
-          )
-        `)
-        .eq('organization_unit_id', unitId)
-        .eq('is_active', true)
+            organization_unit_id,
+            report_sources (
+              id,
+              code,
+              name,
+              category,
+              description,
+              is_active,
+              sort_order
+            )
+          `)
+          .eq('organization_unit_id', unitId)
+          .eq('is_active', true)
       );
 
       if (!error && data) {
@@ -337,7 +722,7 @@ class DailyReportService {
           .filter((item: any) => item.report_sources && item.report_sources.is_active)
           .map((item: any) => ({
             ...item.report_sources,
-            assignment_sort_order: item.sort_order
+            assignment_sort_order: item.sort_order,
           }))
           .sort((a: any, b: any) => {
             if (a.assignment_sort_order !== b.assignment_sort_order) {
@@ -354,15 +739,16 @@ class DailyReportService {
       console.warn('Direct query for report sources failed, attempting API fallback:', err);
     }
 
-    // 2. API fallback
     try {
       const { data: sessionData } = await supabase.auth.getSession();
-      const token = sessionData.session?.access_token;
-      const res = await fetch(`/api/report-sources?organization_unit_id=${encodeURIComponent(unitId)}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (res.ok) {
-        return await res.json();
+      const token = sessionData?.session?.access_token;
+      if (token) {
+        const res = await fetch(`/api/report-sources?organization_unit_id=${encodeURIComponent(unitId)}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (res.ok) {
+          return await res.json();
+        }
       }
     } catch (err) {
       console.error('API fallback for report sources failed:', err);
@@ -371,14 +757,53 @@ class DailyReportService {
     return [];
   }
 
+  /**
+   * Load tasks owned by or assigned to user
+   */
   async getMyTasks(userId: string): Promise<Task[]> {
     const supabase = getSupabaseClient();
     if (!supabase) throw new Error('Supabase client not initialized');
-    
-    // Simplification for getting tasks related to user
-    const { data, error } = await this.fetchWithRetry(async () => await (supabase.from as any)('tasks').select('*').eq('owner_id', userId).order('created_at', { ascending: false }));
-    if (error) return [];
-    return data as Task[];
+
+    try {
+      // 1. Get tasks where owner_id = userId
+      const { data: ownedTasks } = await this.fetchWithRetry(async () =>
+        await (supabase.from as any)('tasks')
+          .select('id, task_code, title, status, priority, due_date, progress, organization_unit_id, owner_id')
+          .eq('owner_id', userId)
+          .eq('is_archived', false)
+          .order('created_at', { ascending: false })
+      );
+
+      // 2. Get task IDs where user is assignee
+      const { data: assigneeRows } = await this.fetchWithRetry(async () =>
+        await (supabase.from as any)('task_assignees')
+          .select('task_id')
+          .eq('user_id', userId)
+      );
+
+      const assignedTaskIds = (assigneeRows || []).map((r: any) => r.task_id).filter(Boolean);
+
+      let assignedTasks: any[] = [];
+      if (assignedTaskIds.length > 0) {
+        const { data: aTasks } = await this.fetchWithRetry(async () =>
+          await (supabase.from as any)('tasks')
+            .select('id, task_code, title, status, priority, due_date, progress, organization_unit_id, owner_id')
+            .in('id', assignedTaskIds)
+            .eq('is_archived', false)
+        );
+        assignedTasks = aTasks || [];
+      }
+
+      // Combine unique tasks
+      const taskMap = new Map<string, Task>();
+      (ownedTasks || []).forEach((t: any) => taskMap.set(t.id, t));
+      assignedTasks.forEach((t: any) => taskMap.set(t.id, t));
+
+      return Array.from(taskMap.values());
+    } catch (err) {
+      console.error('[DailyReportService] Error loading my tasks:', err);
+      return [];
+    }
   }
 }
 

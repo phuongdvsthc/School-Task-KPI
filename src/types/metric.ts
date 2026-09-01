@@ -140,6 +140,7 @@ export interface MetricEntry {
   metric_definition_id: string;
   organization_unit_id: string | null;
   user_id: string | null;
+  daily_report_source_id?: string | null;
   period_start: string;
   period_end: string;
   value: number;
